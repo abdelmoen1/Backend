@@ -17,7 +17,6 @@ class StudentProfile extends Model
         'status',
         'university',
         'academic_major',
-        'specific_major',
         'graduation_year',
         'phone',
         'onboarding_completed',

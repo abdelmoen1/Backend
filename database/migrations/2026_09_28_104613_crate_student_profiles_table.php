@@ -18,7 +18,6 @@ return new class extends Migration
             $table->enum('status', ['graduated', 'student'])->default('student')->nullable();
             $table->string('university')->nullable();
             $table->string('academic_major')->nullable();
-            $table->string('specific_major')->nullable();
             $table->string('graduation_year')->nullable();
             $table->string('phone')->nullable();
             $table->boolean('onboarding_completed')->default(false);

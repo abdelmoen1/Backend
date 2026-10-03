@@ -45,13 +45,6 @@ class UpdateStudentProfileRequest extends FormRequest
                 'max:255',
             ],
 
-            'specific_major' => [
-                'sometimes',
-                'nullable',
-                'string',
-                'max:255',
-            ],
-
             'graduation_year' => [
                 'sometimes',
                 'nullable',

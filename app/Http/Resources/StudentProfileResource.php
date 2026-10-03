@@ -20,7 +20,6 @@ class StudentProfileResource extends JsonResource
 
             'university' => $this->university,
             'academic_major' => $this->academic_major,
-            'specific_major' => $this->specific_major,
             'graduation_year' => $this->graduation_year,
             'phone' => $this->phone,
             'onboarding_completed' => $this->onboarding_completed,
