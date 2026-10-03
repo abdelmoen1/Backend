@@ -11,9 +11,10 @@ WORKDIR /var/www/html
 # نسخ ملفات المشروع بالكامل
 COPY . .
 
-# تثبيت حزم الملحق (Composer) للمشروع
+# تثبيت حزم الملحق (Composer) للمشروع بشكل صحيح
 RUN curl -sS https://getcomposer.org | php -- --install-dir=/usr/local/bin --filename=composer
 RUN composer install --no-dev --optimize-autoloader
+
 
 # تعيين الصلاحيات الصحيحة لمجلدات لارافل لتجنب مشاكل التخزين المؤقت
 RUN chown -R www-data:www-data /var/www/html/storage /var/www/html/bootstrap/cache
