@@ -10,6 +10,8 @@ class StudentSkill extends Model
 {
     use HasFactory;
 
+    public $timestamps = false;
+
     protected $fillable = [
         'student_profile_id',
         'skill_id',

@@ -40,7 +40,7 @@ class AuthController extends Controller
 
         return response()->json([
             'message' => 'تم إنشاء الحساب بنجاح',
-            'user' => $user,
+            'user' => new UserResource($user->load('studentProfile', 'organizationProfile')),
             'token' => $token,
         ], 201);
     }
@@ -60,10 +60,20 @@ class AuthController extends Controller
 
         return response()->json([
             'message' => 'تم تسجيل الدخول بنجاح.',
-            'user' => new UserResource($user),
+            'user' => new UserResource($user->load('studentProfile', 'organizationProfile')),
             'token' => $token,
         ]);
     }
+
+    public function me(Request $request): JsonResponse
+    {
+        return response()->json([
+            'user' => new UserResource(
+                $request->user()->load('studentProfile', 'organizationProfile')
+            ),
+        ]);
+    }
+
     public function logout(Request $request): JsonResponse
     {
         $request->user()->currentAccessToken()->delete();

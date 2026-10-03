@@ -17,8 +17,6 @@ return new class extends Migration
                 ->constrained('skills')
                 ->restrictOnDelete();
 
-            $table->string('proficiency', 50);
-
             $table->unique([
                 'student_profile_id',
                 'skill_id',

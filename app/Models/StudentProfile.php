@@ -20,6 +20,10 @@ class StudentProfile extends Model
         'specific_major',
         'graduation_year',
         'phone',
+        'onboarding_completed',
+    ];
+    protected $casts = [
+        'onboarding_completed' => 'boolean',
     ];
 
     public function user(): BelongsTo

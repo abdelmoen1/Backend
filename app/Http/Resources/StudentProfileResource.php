@@ -12,6 +12,8 @@ class StudentProfileResource extends JsonResource
         return [
             'id' => $this->id,
             'user_id' => $this->user_id,
+            'name' => $this->user?->name,
+            'email' => $this->user?->email,
 
             'bio' => $this->bio,
             'status' => $this->status,
@@ -21,6 +23,7 @@ class StudentProfileResource extends JsonResource
             'specific_major' => $this->specific_major,
             'graduation_year' => $this->graduation_year,
             'phone' => $this->phone,
+            'onboarding_completed' => $this->onboarding_completed,
 
             'created_at' => $this->created_at,
             'updated_at' => $this->updated_at,

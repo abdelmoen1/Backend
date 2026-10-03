@@ -10,7 +10,24 @@ class OrganizationProfile extends Model
 {
     use HasFactory;
 
-    protected $fillable = ['user_id'];
+    protected $fillable = [
+        'user_id',
+        'organization_name',
+        'organization_type',
+        'industry',
+        'description',
+        'location',
+        'website',
+        'contact_person',
+        'onboarding_completed',
+    ];
+
+    protected function casts(): array
+    {
+        return [
+            'onboarding_completed' => 'boolean',
+        ];
+    }
 
     public function user(): BelongsTo
     {

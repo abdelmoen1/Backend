@@ -14,6 +14,14 @@ return new class extends Migration
         Schema::create('organization_profiles', function (Blueprint $table) {
             $table->id();
             $table->foreignId('user_id')->unique()->constrained()->cascadeOnDelete();
+            $table->string('organization_name')->nullable();
+            $table->string('organization_type')->nullable();
+            $table->string('industry')->nullable();
+            $table->text('description')->nullable();
+            $table->string('location')->nullable();
+            $table->string('website')->nullable();
+            $table->string('contact_person')->nullable();
+            $table->boolean('onboarding_completed')->default(false);
             $table->timestamps();
         });
     }

@@ -14,6 +14,11 @@ class UserResource extends JsonResource
             'name' => $this->name,
             'email' => $this->email,
             'role' => $this->role,
+            'onboarding_completed' => $this->role === 'student'
+                ? (bool) $this->studentProfile?->onboarding_completed
+                : ($this->role === 'organization'
+                    ? (bool) $this->organizationProfile?->onboarding_completed
+                    : null),
             'created_at' => $this->created_at,
             'updated_at' => $this->updated_at,
         ];

@@ -21,6 +21,7 @@ return new class extends Migration
             $table->string('specific_major')->nullable();
             $table->string('graduation_year')->nullable();
             $table->string('phone')->nullable();
+            $table->boolean('onboarding_completed')->default(false);
             $table->timestamps();
         });
     }
