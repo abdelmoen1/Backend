@@ -6,6 +6,7 @@ use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\HasMany;
+use Illuminate\Database\Eloquent\Relations\HasOne;
 
 class StudentProfile extends Model
 {
@@ -19,6 +20,9 @@ class StudentProfile extends Model
         'academic_major',
         'graduation_year',
         'phone',
+        'linkedin_url',
+        'github_url',
+        'image_path',
         'onboarding_completed',
     ];
     protected $casts = [
@@ -33,5 +37,10 @@ class StudentProfile extends Model
     public function studentSkills(): HasMany
     {
         return $this->hasMany(StudentSkill::class);
+    }
+
+    public function profileDetails(): HasOne
+    {
+        return $this->hasOne(StudentProfileDetails::class);
     }
 }

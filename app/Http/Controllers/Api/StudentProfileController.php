@@ -7,6 +7,9 @@ use App\Http\Requests\UpdateStudentProfileRequest;
 use App\Http\Resources\StudentProfileResource;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Storage;
+use RuntimeException;
 
 class StudentProfileController extends Controller
 {
@@ -30,7 +33,11 @@ class StudentProfileController extends Controller
 
         return response()->json([
             'success' => true,
-            'data' => new StudentProfileResource($studentProfile->load('user')),
+            'data' => new StudentProfileResource($studentProfile->load([
+                'user',
+                'profileDetails',
+                'studentSkills.skill',
+            ])),
         ]);
     }
 
@@ -47,22 +54,73 @@ class StudentProfileController extends Controller
         }
 
         $validated = $request->validated();
+        $image = $validated['image'] ?? null;
+        unset($validated['image']);
+        $detailFields = [
+            'portfolio',
+            'external_links',
+            'certifications',
+            'testimonials',
+        ];
+        $details = collect($detailFields)
+            ->filter(fn (string $field) => array_key_exists($field, $validated))
+            ->mapWithKeys(fn (string $field) => [$field => $validated[$field]])
+            ->all();
 
-        if (array_key_exists('name', $validated)) {
-            $request->user()->update([
-                'name' => $validated['name'],
-            ]);
-
-            unset($validated['name']);
+        foreach ($detailFields as $field) {
+            unset($validated[$field]);
         }
 
-        $studentProfile->update($validated);
+        if (array_key_exists('name', $validated)) {
+            $userName = $validated['name'];
+        } else {
+            $userName = null;
+        }
+        unset($validated['name']);
+
+        $previousImagePath = $studentProfile->image_path;
+
+        if ($image) {
+            $imagePath = $image->storePublicly('student-profiles', 'public');
+
+            if (!$imagePath) {
+                throw new RuntimeException('Unable to store the student profile image.');
+            }
+
+            $validated['image_path'] = $imagePath;
+        }
+
+        DB::transaction(function () use (
+            $studentProfile,
+            $validated,
+            $details,
+            $request,
+            $userName
+        ): void {
+            $studentProfile->update($validated);
+
+            if ($details !== []) {
+                $studentProfile->profileDetails()->updateOrCreate([], $details);
+            }
+
+            if ($userName !== null) {
+                $request->user()->update(['name' => $userName]);
+            }
+        });
+
+        if ($image && $previousImagePath) {
+            Storage::disk('public')->delete($previousImagePath);
+        }
 
         return response()->json([
             'success' => true,
             'message' => 'Student profile updated successfully.',
             'data' => new StudentProfileResource(
-                $studentProfile->fresh()->load('user')
+                $studentProfile->fresh()->load([
+                    'user',
+                    'profileDetails',
+                    'studentSkills.skill',
+                ])
             ),
         ]);
     }
@@ -91,7 +149,11 @@ class StudentProfileController extends Controller
         return response()->json([
             'success' => true,
             'message' => 'Onboarding completed successfully.',
-            'data' => new StudentProfileResource($studentProfile->fresh()->load('user')),
+            'data' => new StudentProfileResource($studentProfile->fresh()->load([
+                'user',
+                'profileDetails',
+                'studentSkills.skill',
+            ])),
         ]);
     }
 }

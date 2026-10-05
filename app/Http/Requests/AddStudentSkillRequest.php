@@ -9,7 +9,7 @@ class AddStudentSkillRequest extends FormRequest
 {
     public function authorize(): bool
     {
-        return true;
+        return $this->user()?->role === 'student';
     }
 
     public function rules(): array
@@ -20,7 +20,11 @@ class AddStudentSkillRequest extends FormRequest
                 'integer',
                 'exists:skills,id',
             ],
-
+            'proficiency' => [
+                'sometimes',
+                'string',
+                Rule::in(['beginner', 'intermediate', 'advanced', 'expert']),
+            ],
         ];
     }
 

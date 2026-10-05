@@ -15,6 +15,7 @@ class StudentSkill extends Model
     protected $fillable = [
         'student_profile_id',
         'skill_id',
+        'proficiency',
     ];
 
     public function studentProfile(): BelongsTo

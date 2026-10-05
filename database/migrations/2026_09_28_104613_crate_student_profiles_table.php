@@ -20,6 +20,9 @@ return new class extends Migration
             $table->string('academic_major')->nullable();
             $table->string('graduation_year')->nullable();
             $table->string('phone')->nullable();
+            $table->string('linkedin_url')->nullable();
+            $table->string('github_url')->nullable();
+            $table->string('image_path')->nullable();
             $table->boolean('onboarding_completed')->default(false);
             $table->timestamps();
         });
