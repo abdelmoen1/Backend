@@ -4,7 +4,6 @@ namespace App\Http\Resources;
 
 use Illuminate\Http\Request;
 use Illuminate\Http\Resources\Json\JsonResource;
-use Illuminate\Support\Facades\Storage;
 
 class StudentProfileResource extends JsonResource
 {
@@ -27,7 +26,11 @@ class StudentProfileResource extends JsonResource
             'github_url' => $this->github_url,
             'image_path' => $this->image_path,
             'image_url' => $this->image_path
-                ? Storage::disk('public')->url($this->image_path)
+                ? route('api.profile-images.student', [
+                    'filename' => basename(
+                        str_replace('\\', '/', $this->image_path)
+                    ),
+                ])
                 : null,
             'portfolio' => $this->whenLoaded(
                 'profileDetails',

@@ -2,6 +2,7 @@
 
 use App\Http\Controllers\Api\AuthController;
 use App\Http\Controllers\Api\OrganizationProfileController;
+use App\Http\Controllers\Api\ProfileImageController;
 use App\Http\Controllers\Api\ProjectDiscoveryController;
 use App\Http\Controllers\Api\ProjectRequestController;
 use App\Http\Controllers\Api\SkillController;
@@ -13,6 +14,12 @@ Route::post('/register', [AuthController::class, 'register']);
 Route::post('/login', [AuthController::class, 'login']);
 
 Route::get('/skills', [SkillController::class, 'index']);
+Route::get(
+    '/profile-images/student/{filename}',
+    [ProfileImageController::class, 'student']
+)
+    ->where('filename', '[A-Za-z0-9][A-Za-z0-9._-]*')
+    ->name('api.profile-images.student');
 
 Route::middleware('auth:sanctum')->group(function () {
     Route::post('/logout', [AuthController::class, 'logout']);

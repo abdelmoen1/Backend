@@ -2,8 +2,8 @@
 
 namespace Tests\Feature;
 
-use App\Models\StudentProfile;
 use App\Models\Skill;
+use App\Models\StudentProfile;
 use App\Models\User;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Http\UploadedFile;
@@ -281,7 +281,9 @@ class StudentOnboardingTest extends TestCase
         $response->assertJsonPath('data.image_path', $profile->image_path)
             ->assertJsonPath(
                 'data.image_url',
-                Storage::disk('public')->url($profile->image_path)
+                route('api.profile-images.student', [
+                    'filename' => basename($profile->image_path),
+                ])
             );
 
         $this->actingAs($student, 'sanctum')
@@ -290,7 +292,37 @@ class StudentOnboardingTest extends TestCase
             ->assertJsonPath('data.image_path', $profile->image_path)
             ->assertJsonPath(
                 'data.image_url',
-                Storage::disk('public')->url($profile->image_path)
+                route('api.profile-images.student', [
+                    'filename' => basename($profile->image_path),
+                ])
             );
+    }
+
+    public function test_student_profile_images_are_publicly_served_by_laravel(): void
+    {
+        Storage::fake('public');
+        Storage::disk('public')->put(
+            'student-profiles/profile.png',
+            base64_decode(
+                'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/pS8AAAAASUVORK5CYII=',
+                true
+            )
+        );
+
+        $this->get('/api/profile-images/student/profile.png')
+            ->assertOk()
+            ->assertHeader('Content-Type', 'image/png')
+            ->assertHeader('X-Content-Type-Options', 'nosniff');
+    }
+
+    public function test_student_profile_image_endpoint_rejects_missing_and_unsafe_files(): void
+    {
+        Storage::fake('public');
+
+        $this->get('/api/profile-images/student/missing.png')
+            ->assertNotFound();
+
+        $this->get('/api/profile-images/student/..%2F.env')
+            ->assertNotFound();
     }
 }
