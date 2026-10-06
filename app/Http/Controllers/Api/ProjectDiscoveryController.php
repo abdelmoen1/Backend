@@ -156,16 +156,18 @@ class ProjectDiscoveryController extends Controller
             $lockedAnswer->answered_at = now();
             $lockedAnswer->save();
 
-            $lockedSession->current_question_id = null;
-            $lockedSession->current_state = array_merge(
-                $lockedSession->current_state ?? [],
-                [
-                    'answered_count' => $lockedSession->responses()
-                        ->whereNotNull('answered_at')
-                        ->count(),
-                    'last_answered_question_id' => $lockedAnswer->question_id,
-                ]
+            $currentState = $lockedSession->current_state ?? [];
+            $currentState['confirmed_requirements'] = $this->appendConfirmedRequirement(
+                $currentState['confirmed_requirements'] ?? [],
+                $lockedAnswer
             );
+            $lockedSession->current_question_id = null;
+            $lockedSession->current_state = array_merge($currentState, [
+                'answered_count' => $lockedSession->responses()
+                    ->whereNotNull('answered_at')
+                    ->count(),
+                'last_answered_question_id' => $lockedAnswer->question_id,
+            ]);
             $lockedSession->save();
 
             $lockedRecord->status = ProjectRequestStatus::INTAKE_IN_PROGRESS;
@@ -242,6 +244,11 @@ class ProjectDiscoveryController extends Controller
                     'custom_answer'
                 ))),
             ],
+            'structured_understanding' => [
+                'source' => 'confirmed_user_answers_only',
+                'instruction' => 'هذه متطلبات مؤكدة من إجابات المؤسسة فقط. لا تضف إليها استنتاجات أو افتراضات. استخدم سجل history الكامل لمعرفة تسلسل الأسئلة والإجابات وآخر إجابة.',
+                'confirmed_requirements' => $this->confirmedRequirements($session),
+            ],
             'remaining_unknowns' => [
                 'instruction' => 'استنتج من سياق المشروع وسجل الاكتشاف المعلومات المؤثرة التي لا تزال غير معروفة أو ملتبسة. لا تفترض أن كل مجال أدناه مجهول ولا تسأل عن معلومة حُسمت بالفعل.',
                 'areas_to_assess' => [
@@ -253,6 +260,82 @@ class ProjectDiscoveryController extends Controller
             ],
             'history' => $history,
         ];
+    }
+
+    private function confirmedRequirements(
+        IntakeSession $session
+    ): array {
+        $state = $session->current_state ?? [];
+        $confirmedRequirements = $state['confirmed_requirements'] ?? null;
+
+        if (is_array($confirmedRequirements)) {
+            return array_values($confirmedRequirements);
+        }
+
+        return $session->responses()
+            ->whereNotNull('answered_at')
+            ->get()
+            ->map(fn (IntakeResponse $response): array => $this->confirmedRequirement($response))
+            ->all();
+    }
+
+    private function appendConfirmedRequirement(
+        mixed $existingRequirements,
+        IntakeResponse $response
+    ): array {
+        $requirements = is_array($existingRequirements)
+            ? array_values($existingRequirements)
+            : [];
+        $requirement = $this->confirmedRequirement($response);
+
+        foreach ($requirements as $index => $existingRequirement) {
+            if (
+                is_array($existingRequirement)
+                && ($existingRequirement['question_id'] ?? null) === $requirement['question_id']
+            ) {
+                $requirements[$index] = array_merge(
+                    $existingRequirement,
+                    $requirement
+                );
+
+                return $requirements;
+            }
+        }
+
+        $requirements[] = $requirement;
+
+        return $requirements;
+    }
+
+    private function confirmedRequirement(IntakeResponse $response): array
+    {
+        $selectedValues = is_array($response->selected_answer)
+            ? $response->selected_answer
+            : [$response->selected_answer];
+        $labelsByValue = array_column($response->options ?? [], 'label_ar', 'value');
+        $selectedLabels = $response->question_type === 'yes_no'
+            && is_bool($response->selected_answer)
+            ? [$response->selected_answer ? 'نعم' : 'لا']
+            : array_values(array_filter(array_map(
+                fn (mixed $value): ?string => is_string($value)
+                    ? ($labelsByValue[$value] ?? null)
+                    : null,
+                $selectedValues
+            )));
+
+        $requirement = [
+            'sequence' => $response->sequence,
+            'question_id' => $response->question_id,
+            'question' => $response->question_text,
+            'answer' => $response->selected_answer,
+            'selected_option_labels' => $selectedLabels,
+            'source' => 'user_answer',
+        ];
+        if (is_string($response->custom_answer) && trim($response->custom_answer) !== '') {
+            $requirement['custom_answer'] = $response->custom_answer;
+        }
+
+        return $requirement;
     }
 
     private function repeatsPreviousQuestion(IntakeSession $session, array $question): bool

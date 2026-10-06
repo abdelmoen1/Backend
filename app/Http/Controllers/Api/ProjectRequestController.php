@@ -6,14 +6,12 @@ use App\Contracts\ProjectProposalGenerator;
 use App\Enums\ProjectRequestStatus;
 use App\Http\Controllers\Controller;
 use App\Http\Requests\RequestProjectRevisionRequest;
-use App\Http\Requests\SaveProjectIntakeRequest;
 use App\Http\Requests\StoreProjectRequestRequest;
 use App\Http\Requests\UpdateProjectRequestRequest;
 use App\Http\Resources\ProjectRequestResource;
 use App\Models\IntakeSession;
 use App\Models\ProjectRequest;
 use App\Services\AI\ProjectProposalException;
-use App\Services\IntakeQuestionService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
@@ -63,39 +61,6 @@ class ProjectRequestController extends Controller
         int $projectRequest
     ): JsonResponse {
         $record = $this->ownedRequest($request, $projectRequest);
-        $record->update($request->validated());
-
-        return response()->json([
-            'success' => true,
-            'data' => new ProjectRequestResource($record->fresh()),
-        ]);
-    }
-
-    public function intake(
-        Request $request,
-        int $projectRequest,
-        IntakeQuestionService $questions
-    ): JsonResponse {
-        if ($response = $this->organizationOnly($request)) {
-            return $response;
-        }
-
-        $record = $this->ownedRequest($request, $projectRequest);
-
-        return response()->json([
-            'success' => true,
-            'data' => [
-                'project_request' => new ProjectRequestResource($record),
-                'questions' => $questions->questions($record),
-            ],
-        ]);
-    }
-
-    public function saveIntake(
-        SaveProjectIntakeRequest $request,
-        int $projectRequest
-    ): JsonResponse {
-        $record = $this->ownedRequest($request, $projectRequest);
         if ($record->status === ProjectRequestStatus::APPROVED) {
             return response()->json([
                 'success' => false,
@@ -113,8 +78,8 @@ class ProjectRequestController extends Controller
         }
 
         $validated = $request->validated();
-        $responses = $validated['responses'] ?? [];
-        unset($validated['responses']);
+        $intakeData = $validated['intake_data'] ?? [];
+        unset($validated['intake_data']);
 
         if ($record->proposal) {
             $record->proposal = null;
@@ -123,7 +88,7 @@ class ProjectRequestController extends Controller
         $record->fill($validated);
         $record->intake_data = array_merge(
             $record->intake_data ?? [],
-            $responses
+            $intakeData
         );
         $record->status = ProjectRequestStatus::INTAKE_IN_PROGRESS;
         $record->save();

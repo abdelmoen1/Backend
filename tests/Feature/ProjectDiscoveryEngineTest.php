@@ -172,6 +172,116 @@ class ProjectDiscoveryEngineTest extends TestCase
         );
         $this->assertSame('عيادة', $contexts[1]['organization']['type']);
         $this->assertSame('مواعيد المرضى', $contexts[1]['project']['title']);
+        $this->assertSame(
+            'نريد إرسال تذكير للمريض عبر WhatsApp',
+            $contexts[1]['structured_understanding']['confirmed_requirements'][0]['custom_answer']
+        );
+        $this->assertSame(
+            'user_answer',
+            $contexts[1]['structured_understanding']['confirmed_requirements'][0]['source']
+        );
+        $this->assertSame(
+            'نريد إرسال تذكير للمريض عبر WhatsApp',
+            $projectRequest->intakeSession->fresh()
+                ->current_state['confirmed_requirements'][0]['custom_answer']
+        );
+    }
+
+    public function test_resume_returns_the_pending_question_without_calling_gemini_again(): void
+    {
+        $organization = $this->organization('resume-discovery@example.test', 'عيادة');
+        $projectRequest = $organization->organizationProfile->projectRequests()->create([
+            'title' => 'مواعيد المرضى',
+            'problem_description' => 'تنظيم المواعيد.',
+        ]);
+        Http::fake([
+            '*' => Http::response($this->geminiResponse([
+                'status' => 'question',
+                'question' => $this->question('booking_flow', 'كيف يتم الحجز؟'),
+            ])),
+        ]);
+
+        $this->actingAs($organization, 'sanctum')
+            ->postJson("/api/organization/project-requests/{$projectRequest->id}/next-question")
+            ->assertOk()
+            ->assertJsonPath('data.question.id', 'booking_flow');
+
+        $this->postJson("/api/organization/project-requests/{$projectRequest->id}/next-question")
+            ->assertOk()
+            ->assertJsonPath('data.question.id', 'booking_flow')
+            ->assertJsonCount(1, 'data.history');
+
+        Http::assertSentCount(1);
+    }
+
+    public function test_confirmed_state_appends_user_answers_without_erasing_existing_facts(): void
+    {
+        $organization = $this->organization('state-merge@example.test', 'عيادة');
+        $projectRequest = $organization->organizationProfile->projectRequests()->create([
+            'title' => 'تنظيم المواعيد',
+            'problem_description' => 'إدارة المواعيد يدويًا.',
+        ]);
+        $existingRequirement = [
+            'sequence' => 1,
+            'question_id' => 'existing_need',
+            'question' => 'ما الحاجة المؤكدة؟',
+            'answer' => 'تقليل وقت الانتظار',
+            'selected_option_labels' => [],
+            'custom_answer' => 'تفصيل محفوظ',
+            'source' => 'user_answer',
+        ];
+        $session = $projectRequest->intakeSession()->create([
+            'current_question_id' => 'new_need',
+            'current_state' => [
+                'confirmed_requirements' => [$existingRequirement],
+                'existing_marker' => 'preserve-me',
+            ],
+        ]);
+        $session->responses()->create([
+            'sequence' => 1,
+            'question_id' => 'existing_need',
+            'question_text' => 'ما الحاجة المؤكدة؟',
+            'question_type' => 'short_text',
+            'selected_answer' => 'تقليل وقت الانتظار',
+            'custom_answer' => 'تفصيل محفوظ',
+            'answered_at' => now(),
+        ]);
+        $session->responses()->create([
+            'sequence' => 2,
+            'question_id' => 'new_need',
+            'question_text' => 'ما النتيجة المطلوبة؟',
+            'question_type' => 'short_text',
+        ]);
+        Http::fake([
+            '*' => Http::response($this->geminiResponse([
+                'status' => 'complete',
+                'question' => null,
+            ])),
+        ]);
+
+        $this->actingAs($organization, 'sanctum')
+            ->postJson("/api/organization/project-requests/{$projectRequest->id}/answer", [
+                'question_id' => 'new_need',
+                'selected_answer' => 'إتمام الحجز خلال دقيقة',
+            ])
+            ->assertOk()
+            ->assertJsonPath('data.status', 'complete');
+
+        $state = $session->fresh()->current_state;
+        $this->assertSame('preserve-me', $state['existing_marker']);
+        $this->assertSame($existingRequirement, $state['confirmed_requirements'][0]);
+        $this->assertSame(
+            'إتمام الحجز خلال دقيقة',
+            $state['confirmed_requirements'][1]['answer']
+        );
+        $this->assertArrayNotHasKey(
+            'custom_answer',
+            $state['confirmed_requirements'][1]
+        );
+        $this->assertSame(
+            'user_answer',
+            $state['confirmed_requirements'][1]['source']
+        );
     }
 
     public function test_duplicate_answer_is_idempotent_and_next_question_is_not_duplicated(): void
@@ -431,6 +541,11 @@ class ProjectDiscoveryEngineTest extends TestCase
             $this->assertNotNull(
                 $session->responses()->firstOrFail()->fresh()->answered_at
             );
+            $this->assertSame(
+                $answer,
+                $session->fresh()->current_state['confirmed_requirements'][0]['answer']
+            );
+            $this->assertTrue($session->fresh()->current_state['completed']);
         }
     }
 

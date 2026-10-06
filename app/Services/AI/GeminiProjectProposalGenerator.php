@@ -2,17 +2,19 @@
 
 namespace App\Services\AI;
 
+use App\Contracts\AIProvider;
 use App\Contracts\ProjectProposalGenerator;
 use App\Models\IntakeResponse;
 use App\Models\ProjectRequest;
 use Illuminate\Http\Client\ConnectionException;
 use Illuminate\Http\Client\Response;
-use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
 use JsonException;
 
 class GeminiProjectProposalGenerator implements ProjectProposalGenerator
 {
+    public function __construct(private readonly AIProvider $provider) {}
+
     private const RESPONSE_SCHEMA = [
         'type' => 'OBJECT',
         'properties' => [
@@ -147,15 +149,6 @@ class GeminiProjectProposalGenerator implements ProjectProposalGenerator
 
     public function generate(ProjectRequest $projectRequest): array
     {
-        $apiKey = config('services.gemini.api_key');
-        if (! is_string($apiKey) || trim($apiKey) === '') {
-            Log::error('Gemini project proposal generation is not configured.', [
-                'provider' => 'gemini',
-            ]);
-
-            throw ProjectProposalException::unavailable();
-        }
-
         try {
             $context = json_encode(
                 $this->proposalContext($projectRequest),
@@ -170,37 +163,36 @@ class GeminiProjectProposalGenerator implements ProjectProposalGenerator
         }
 
         try {
-            $response = Http::withHeaders(['x-goog-api-key' => $apiKey])
-                ->acceptJson()
-                ->timeout((int) config('services.gemini.timeout', 30))
-                ->post(
-                    rtrim((string) config('services.gemini.base_url'), '/')
-                        .'/models/'.config('services.gemini.model').':generateContent',
-                    [
-                        'systemInstruction' => [
-                            'parts' => [[
-                                'text' => implode("\n", [
-                                    'أنت مستشار تحليل أعمال وتصميم مشاريع في GoTraniee. أنشئ مقترحًا عربيًا مهنيًا واضحًا لمؤسسة غير تقنية.',
-                                    'استخدم حقائق السياق والإجابات المؤكدة فقط بوصفها حقائق. افصل الافتراضات صراحةً عن الحقائق، ولا تخترع متطلبات مؤكدة.',
-                                    'اقترح الحل والتقنيات والفريق بما يتناسب مع حجم المشكلة. لا تذكر تقنية بعينها إلا إذا كان لها مبرر واضح في هذا المشروع؛ اذكر "يُحدد لاحقًا" عند غياب مبرر كافٍ.',
-                                    'حوّل أهداف المؤسسة إلى أهداف ومعايير نجاح قابلة للفهم. اجعل نطاق الوظائف مجموعات عملية ومتطلبات محددة، واذكر ما هو خارج النطاق بوضوح.',
-                                    'قدّم مدة وتكلفة كنطاقين مبدئيين غير ملزمين، وابدأ نص التكلفة بالعبارة "تقدير مبدئي". لا تقدّمها كسعر ملزم. لا تخترع أسعارًا محلية دقيقة دون أساس؛ وضّح ما يلزم تأكيده.',
-                                    'قدّر التكاليف التشغيلية ذات الصلة مثل الاستضافة والنطاق والواجهات الخارجية والصيانة، واذكر عند تعذر التقدير أنها تحتاج إلى تأكيد.',
-                                    'أدرج القرارات الناقصة أو الغامضة ضمن needs_confirmation، ولا تحوّلها إلى حقائق أو افتراضات مؤكدة.',
-                                    'أعد جميع أقسام المخطط. اكتب JSON صالحًا مطابقًا للمخطط فقط، دون Markdown أو نص إضافي.',
-                                ]),
-                            ]],
-                        ],
-                        'contents' => [[
-                            'role' => 'user',
-                            'parts' => [['text' => $context]],
-                        ]],
-                        'generationConfig' => [
-                            'responseMimeType' => 'application/json',
-                            'responseSchema' => self::RESPONSE_SCHEMA,
-                        ],
-                    ]
-                );
+            $response = $this->provider->generateResponse([
+                'systemInstruction' => [
+                    'parts' => [[
+                        'text' => implode("\n", [
+                            'أنت مستشار تحليل أعمال وتصميم مشاريع في GoTraniee. أنشئ مقترحًا عربيًا مهنيًا واضحًا لمؤسسة غير تقنية.',
+                            'استخدم حقائق السياق والإجابات المؤكدة فقط بوصفها حقائق. افصل الافتراضات صراحةً عن الحقائق، ولا تخترع متطلبات مؤكدة.',
+                            'اقترح الحل والتقنيات والفريق بما يتناسب مع حجم المشكلة. لا تذكر تقنية بعينها إلا إذا كان لها مبرر واضح في هذا المشروع؛ اذكر "يُحدد لاحقًا" عند غياب مبرر كافٍ.',
+                            'حوّل أهداف المؤسسة إلى أهداف ومعايير نجاح قابلة للفهم. اجعل نطاق الوظائف مجموعات عملية ومتطلبات محددة، واذكر ما هو خارج النطاق بوضوح.',
+                            'قدّم مدة وتكلفة كنطاقين مبدئيين غير ملزمين، وابدأ نص التكلفة بالعبارة "تقدير مبدئي". لا تقدّمها كسعر ملزم. لا تخترع أسعارًا محلية دقيقة دون أساس؛ وضّح ما يلزم تأكيده.',
+                            'قدّر التكاليف التشغيلية ذات الصلة مثل الاستضافة والنطاق والواجهات الخارجية والصيانة، واذكر عند تعذر التقدير أنها تحتاج إلى تأكيد.',
+                            'أدرج القرارات الناقصة أو الغامضة ضمن needs_confirmation، ولا تحوّلها إلى حقائق أو افتراضات مؤكدة.',
+                            'أعد جميع أقسام المخطط. اكتب JSON صالحًا مطابقًا للمخطط فقط، دون Markdown أو نص إضافي.',
+                        ]),
+                    ]],
+                ],
+                'contents' => [[
+                    'role' => 'user',
+                    'parts' => [['text' => $context]],
+                ]],
+                'generationConfig' => [
+                    'responseMimeType' => 'application/json',
+                    'responseSchema' => self::RESPONSE_SCHEMA,
+                ],
+            ]);
+        } catch (AIProviderConfigurationException) {
+            Log::error('Gemini project proposal generation is not configured.', [
+                'provider' => 'gemini',
+            ]);
+
+            throw ProjectProposalException::unavailable();
         } catch (ConnectionException) {
             Log::warning('Gemini project proposal connection failed.', [
                 'provider' => 'gemini',

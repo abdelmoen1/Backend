@@ -10,6 +10,7 @@ use App\Models\ProjectRequest;
 use App\Models\User;
 use App\Services\AI\ProjectProposalException;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Facades\Http;
 use Tests\Support\ProjectProposalFixture;
 use Tests\TestCase;
 
@@ -41,6 +42,111 @@ class ProjectProposalFlowTest extends TestCase
             ->assertOk()
             ->assertJsonPath('data.proposal.required_skills.0', 'تحليل الأعمال')
             ->assertJsonPath('data.proposal.milestones.1.title', 'التطوير');
+    }
+
+    public function test_canonical_project_discovery_proposal_revision_and_approval_flow(): void
+    {
+        $organization = $this->organization('canonical-flow@example.test');
+        $created = $this->actingAs($organization, 'sanctum')
+            ->postJson('/api/organization/project-requests', [
+                'title' => 'Clinic appointments',
+            ])
+            ->assertCreated()
+            ->json('data');
+        $projectRequestId = $created['id'];
+
+        $this->patchJson("/api/organization/project-requests/{$projectRequestId}", [
+            'title' => 'Clinic appointment system',
+            'problem_description' => 'Appointments are tracked manually and often overlap.',
+            'intake_data' => ['expected_outcome' => 'Reduce waiting time.'],
+        ])
+            ->assertOk()
+            ->assertJsonPath('data.intake_data.expected_outcome', 'Reduce waiting time.');
+
+        Http::fake([
+            '*' => Http::sequence()
+                ->push($this->geminiResponse([
+                    'status' => 'question',
+                    'question' => [
+                        'id' => 'booking_workflow',
+                        'text_ar' => 'كيف تسجلون المواعيد حاليًا؟',
+                        'type' => 'short_text',
+                        'options' => [],
+                    ],
+                ]))
+                ->push($this->geminiResponse([
+                    'status' => 'question',
+                    'question' => [
+                        'id' => 'daily_volume',
+                        'text_ar' => 'كم موعدًا تديرون في اليوم؟',
+                        'type' => 'number',
+                        'options' => [],
+                    ],
+                ]))
+                ->push($this->geminiResponse([
+                    'status' => 'complete',
+                    'question' => null,
+                ])),
+        ]);
+
+        $this->postJson("/api/organization/project-requests/{$projectRequestId}/next-question")
+            ->assertOk()
+            ->assertJsonPath('data.status', 'question')
+            ->assertJsonPath('data.question.id', 'booking_workflow');
+
+        $this->postJson("/api/organization/project-requests/{$projectRequestId}/answer", [
+            'question_id' => 'booking_workflow',
+            'selected_answer' => 'نستخدم دفترًا ورقيًا وجدولًا مشتركًا.',
+        ])
+            ->assertOk()
+            ->assertJsonPath('data.question.id', 'daily_volume')
+            ->assertJsonPath('data.history.0.selected_answer', 'نستخدم دفترًا ورقيًا وجدولًا مشتركًا.');
+
+        $this->postJson("/api/organization/project-requests/{$projectRequestId}/next-question")
+            ->assertOk()
+            ->assertJsonPath('data.question.id', 'daily_volume')
+            ->assertJsonCount(2, 'data.history');
+        Http::assertSentCount(2);
+
+        $this->postJson("/api/organization/project-requests/{$projectRequestId}/answer", [
+            'question_id' => 'daily_volume',
+            'selected_answer' => 35,
+        ])
+            ->assertOk()
+            ->assertJsonPath('data.status', 'complete')
+            ->assertJsonCount(2, 'data.history');
+
+        $session = IntakeSession::query()
+            ->where('project_request_id', $projectRequestId)
+            ->firstOrFail();
+        $this->assertSame(IntakeSession::STATUS_COMPLETED, $session->status);
+        $this->assertSame(2, count($session->current_state['confirmed_requirements']));
+        Http::assertSentCount(3);
+
+        $generator = \Mockery::mock(ProjectProposalGenerator::class);
+        $generator->shouldReceive('generate')
+            ->twice()
+            ->andReturn(ProjectProposalFixture::valid());
+        $this->app->instance(ProjectProposalGenerator::class, $generator);
+
+        $this->postJson("/api/organization/project-requests/{$projectRequestId}/analyze")
+            ->assertOk()
+            ->assertJsonPath('data.status', ProjectRequestStatus::PROPOSAL_READY)
+            ->assertJsonPath('data.proposal.project_overview.project_name', 'نظام إدارة مواعيد العيادة');
+
+        $this->postJson("/api/organization/project-requests/{$projectRequestId}/revision", [
+            'note' => 'Please clarify the appointment reminder workflow.',
+        ])
+            ->assertOk()
+            ->assertJsonPath('data.status', ProjectRequestStatus::REVISION_REQUESTED);
+
+        $this->postJson("/api/organization/project-requests/{$projectRequestId}/analyze")
+            ->assertOk()
+            ->assertJsonPath('data.status', ProjectRequestStatus::PROPOSAL_READY);
+
+        $this->postJson("/api/organization/project-requests/{$projectRequestId}/approve")
+            ->assertOk()
+            ->assertJsonPath('data.status', ProjectRequestStatus::APPROVED);
     }
 
     public function test_proposal_generation_requires_completed_discovery_and_reuses_existing_proposal(): void
@@ -174,6 +280,21 @@ class ProjectProposalFlowTest extends TestCase
         ]);
 
         return $projectRequest;
+    }
+
+    private function geminiResponse(array $result): array
+    {
+        return [
+            'candidates' => [[
+                'content' => [
+                    'parts' => [[
+                        'text' => json_encode($result, JSON_UNESCAPED_UNICODE),
+                    ]],
+                    'role' => 'model',
+                ],
+                'finishReason' => 'STOP',
+            ]],
+        ];
     }
 
     private function organization(string $email): User

@@ -74,11 +74,12 @@ class ProjectRequestFlowTest extends TestCase
         ])->assertNotFound();
     }
 
-    public function test_intake_is_saved_and_retrieved_and_proposal_can_be_approved(): void
+    public function test_project_context_is_saved_on_project_request_and_proposal_can_be_approved(): void
     {
-        $organization = $this->organization('intake@example.com');
+        $organization = $this->organization('project-context@example.com');
         $projectRequest = $organization->organizationProfile->projectRequests()->create([
             'title' => 'Clinic appointments',
+            'intake_data' => ['other_process' => 'Paper logbook'],
         ]);
         IntakeSession::create([
             'project_request_id' => $projectRequest->id,
@@ -86,23 +87,25 @@ class ProjectRequestFlowTest extends TestCase
         ]);
 
         $this->actingAs($organization, 'sanctum')
-            ->postJson("/api/organization/project-requests/{$projectRequest->id}/intake", [
+            ->patchJson("/api/organization/project-requests/{$projectRequest->id}", [
                 'title' => 'Clinic appointment system',
                 'problem_description' => 'Appointments are tracked in WhatsApp and paper.',
-                'current_process' => ['WhatsApp', 'الأوراق والدفاتر'],
-                'target_users' => ['المرضى', 'الموظفون'],
-                'desired_outcomes' => ['توفير الوقت'],
-                'responses' => ['main_challenge' => 'تنظيم العمل'],
+                'intake_data' => ['expected_outcome' => 'تقليل وقت الانتظار'],
             ])
             ->assertOk()
             ->assertJsonPath('data.status', ProjectRequestStatus::INTAKE_IN_PROGRESS)
-            ->assertJsonPath('data.intake_data.main_challenge', 'تنظيم العمل');
+            ->assertJsonPath('data.intake_data.other_process', 'Paper logbook')
+            ->assertJsonPath('data.intake_data.expected_outcome', 'تقليل وقت الانتظار');
+
+        $this->getJson("/api/organization/project-requests/{$projectRequest->id}")
+            ->assertOk()
+            ->assertJsonPath('data.title', 'Clinic appointment system')
+            ->assertJsonPath('data.intake_data.expected_outcome', 'تقليل وقت الانتظار');
 
         $this->getJson("/api/organization/project-requests/{$projectRequest->id}/intake")
-            ->assertOk()
-            ->assertJsonPath('data.project_request.title', 'Clinic appointment system')
-            ->assertJsonPath('data.project_request.intake_data.main_challenge', 'تنظيم العمل')
-            ->assertJsonPath('data.questions.0.key', 'main_challenge');
+            ->assertNotFound();
+        $this->postJson("/api/organization/project-requests/{$projectRequest->id}/intake", [])
+            ->assertNotFound();
 
         $generator = \Mockery::mock(ProjectProposalGenerator::class);
         $generator->shouldReceive('generate')
@@ -147,7 +150,7 @@ class ProjectRequestFlowTest extends TestCase
             ->assertJsonPath('data.intake_data.main_challenge', 'تنظيم العمل');
     }
 
-    public function test_changing_intake_clears_stale_proposal_and_approved_request_is_locked(): void
+    public function test_updating_project_context_clears_stale_proposal_and_approved_request_is_locked(): void
     {
         $organization = $this->organization('locked@example.com');
         $projectRequest = $organization->organizationProfile->projectRequests()->create([
@@ -158,7 +161,7 @@ class ProjectRequestFlowTest extends TestCase
         ]);
 
         $this->actingAs($organization, 'sanctum')
-            ->postJson("/api/organization/project-requests/{$projectRequest->id}/intake", [
+            ->patchJson("/api/organization/project-requests/{$projectRequest->id}", [
                 'problem_description' => 'An updated detailed problem description.',
             ])
             ->assertOk()
@@ -170,7 +173,7 @@ class ProjectRequestFlowTest extends TestCase
             'proposal' => ['summary' => 'Approved draft'],
         ]);
 
-        $this->postJson("/api/organization/project-requests/{$projectRequest->id}/intake", [
+        $this->patchJson("/api/organization/project-requests/{$projectRequest->id}", [
             'problem_description' => 'A different detailed problem description.',
         ])->assertUnprocessable();
     }
@@ -218,7 +221,7 @@ class ProjectRequestFlowTest extends TestCase
         ]);
     }
 
-    public function test_intake_and_revision_reject_invalid_data(): void
+    public function test_project_context_and_revision_reject_invalid_data(): void
     {
         $organization = $this->organization('invalid@example.com');
         $projectRequest = $organization->organizationProfile->projectRequests()->create([
@@ -226,7 +229,7 @@ class ProjectRequestFlowTest extends TestCase
         ]);
 
         $this->actingAs($organization, 'sanctum')
-            ->postJson("/api/organization/project-requests/{$projectRequest->id}/intake", [
+            ->patchJson("/api/organization/project-requests/{$projectRequest->id}", [
                 'problem_description' => 'short',
                 'priority' => 'impossible',
                 'budget_range' => 'invalid',

@@ -17,7 +17,7 @@ class UpdateProjectRequestRequest extends FormRequest
     {
         return [
             'title' => ['sometimes', 'required', 'string', 'max:255'],
-            'problem_description' => ['sometimes', 'nullable', 'string', 'max:10000'],
+            'problem_description' => ['sometimes', 'nullable', 'string', 'min:10', 'max:10000'],
             'current_process' => ['sometimes', 'nullable', 'array', 'max:20'],
             'current_process.*' => ['string', Rule::in(ProjectRequestOptions::CURRENT_PROCESS)],
             'target_users' => ['sometimes', 'nullable', 'array', 'max:20'],
@@ -30,6 +30,10 @@ class UpdateProjectRequestRequest extends FormRequest
             'priority' => ['sometimes', 'nullable', Rule::in(['low', 'medium', 'high', 'urgent'])],
             'budget_range' => ['sometimes', 'nullable', Rule::in(ProjectRequestOptions::BUDGET_RANGES)],
             'special_requirements' => ['sometimes', 'nullable', 'string', 'max:5000'],
+            'intake_data' => ['sometimes', 'array'],
+            'intake_data.other_process' => ['sometimes', 'nullable', 'string', 'max:255'],
+            'intake_data.other_user' => ['sometimes', 'nullable', 'string', 'max:255'],
+            'intake_data.expected_outcome' => ['sometimes', 'nullable', 'string', 'max:2000'],
         ];
     }
 }
