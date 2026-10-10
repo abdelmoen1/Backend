@@ -38,8 +38,11 @@ return [
     'gemini' => [
         'api_key' => env('GEMINI_API_KEY'),
         'base_url' => env('GEMINI_BASE_URL', 'https://generativelanguage.googleapis.com/v1beta'),
-        'model' => env('GEMINI_MODEL', 'gemini-3.8-flash'),
-        'timeout' => (int) env('GEMINI_TIMEOUT', 30),
+        'model' => env('GEMINI_MODEL', 'gemini-flash-lite-latest'),
+        'timeout' => (int) env('GEMINI_TIMEOUT', 60),
+        'max_retries' => (int) env('GEMINI_MAX_RETRIES', 2),
+        'retry_delay_ms' => (int) env('GEMINI_RETRY_DELAY_MS', 1000),
+        'thinking_budget' => env('GEMINI_THINKING_BUDGET'),
     ],
 
 ];

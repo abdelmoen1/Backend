@@ -7,7 +7,6 @@ use App\Contracts\ProjectProposalGenerator;
 use App\Models\IntakeResponse;
 use App\Models\ProjectRequest;
 use Illuminate\Http\Client\ConnectionException;
-use Illuminate\Http\Client\Response;
 use Illuminate\Support\Facades\Log;
 use JsonException;
 
@@ -210,10 +209,13 @@ class GeminiProjectProposalGenerator implements ProjectProposalGenerator
             throw ProjectProposalException::unavailable();
         }
 
-        $proposal = $this->normalize($this->extractOutput($response));
+        $extracted = GeminiStructuredOutput::extract($response);
+        $proposal = $this->normalize($extracted['data']);
         if ($proposal === null) {
             Log::warning('Gemini project proposal returned invalid structured output.', [
                 'provider' => 'gemini',
+                'parse_error' => $extracted['diagnostic']['parse_error'] ?? 'schema_validation',
+                'finish_reason' => $extracted['diagnostic']['finish_reason'] ?? null,
             ]);
 
             throw ProjectProposalException::unavailable();
@@ -263,6 +265,8 @@ class GeminiProjectProposalGenerator implements ProjectProposalGenerator
             'confirmed_requirements' => [
                 'goals' => $projectRequest->desired_outcomes ?? [],
                 'constraints' => $projectRequest->special_requirements,
+                'confirmed_discovery_answers' => $projectRequest->intakeSession?->current_state['confirmed_requirements']
+                    ?? $history,
             ],
             'assumptions' => [],
             'unresolved_questions' => $projectRequest->intake_data['unresolved_questions'] ?? [],
@@ -289,33 +293,9 @@ class GeminiProjectProposalGenerator implements ProjectProposalGenerator
         return $labelsByValue[$answer] ?? $answer;
     }
 
-    private function extractOutput(Response $response): mixed
-    {
-        $body = $response->json();
-        if (
-            ! is_array($body)
-            || ! is_array($body['candidates'] ?? null)
-            || count($body['candidates']) !== 1
-        ) {
-            return null;
-        }
-
-        $candidate = $body['candidates'][0] ?? null;
-        $parts = $candidate['content']['parts'] ?? null;
-        if (! is_array($parts) || count($parts) !== 1 || ! is_string($parts[0]['text'] ?? null)) {
-            return null;
-        }
-
-        try {
-            return json_decode($parts[0]['text'], true, 512, JSON_THROW_ON_ERROR);
-        } catch (JsonException) {
-            return null;
-        }
-    }
-
     private function normalize(mixed $proposal): ?array
     {
-        if (! is_array($proposal) || ! $this->hasExactKeys($proposal, self::requiredKeys(self::RESPONSE_SCHEMA))) {
+        if (! is_array($proposal) || ! $this->hasRequiredKeys($proposal, self::requiredKeys(self::RESPONSE_SCHEMA))) {
             return null;
         }
 
@@ -325,7 +305,7 @@ class GeminiProjectProposalGenerator implements ProjectProposalGenerator
             'technical_recommendation' => ['application_type', 'frontend', 'backend', 'database', 'integrations', 'rationale'],
             'srs_summary' => ['functional_requirements', 'non_functional_considerations'],
         ] as $key => $requiredKeys) {
-            if (! is_array($proposal[$key]) || ! $this->hasExactKeys($proposal[$key], $requiredKeys)) {
+            if (! is_array($proposal[$key]) || ! $this->hasRequiredKeys($proposal[$key], $requiredKeys)) {
                 return null;
             }
         }
@@ -394,7 +374,7 @@ class GeminiProjectProposalGenerator implements ProjectProposalGenerator
         foreach ($proposal['functional_scope'] as $group) {
             if (
                 ! is_array($group)
-                || ! $this->hasExactKeys($group, ['group', 'requirements'])
+                || ! $this->hasRequiredKeys($group, ['group', 'requirements'])
                 || ! is_string($group['group'])
                 || trim($group['group']) === ''
                 || mb_strlen($group['group']) > 2000
@@ -429,7 +409,7 @@ class GeminiProjectProposalGenerator implements ProjectProposalGenerator
         }
 
         foreach ($items as $item) {
-            if (! is_array($item) || ! $this->hasExactKeys($item, $keys)) {
+            if (! is_array($item) || ! $this->hasRequiredKeys($item, $keys)) {
                 return false;
             }
             foreach ($keys as $key) {
@@ -442,13 +422,15 @@ class GeminiProjectProposalGenerator implements ProjectProposalGenerator
         return true;
     }
 
-    private function hasExactKeys(array $value, array $keys): bool
+    private function hasRequiredKeys(array $value, array $keys): bool
     {
-        $actual = array_keys($value);
-        sort($actual);
-        sort($keys);
+        foreach ($keys as $key) {
+            if (! array_key_exists($key, $value)) {
+                return false;
+            }
+        }
 
-        return $actual === $keys;
+        return true;
     }
 
     private static function requiredKeys(array $schema): array

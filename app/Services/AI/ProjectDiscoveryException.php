@@ -13,9 +13,9 @@ class ProjectDiscoveryException extends RuntimeException
         parent::__construct($message);
     }
 
-    public static function unavailable(): self
+    public static function unavailable(?array $providerDiagnostic = null): self
     {
-        return new self('تعذر التواصل مع خدمة الذكاء الاصطناعي حاليًا.');
+        return new self('تعذر التواصل مع خدمة الذكاء الاصطناعي حاليًا.', $providerDiagnostic);
     }
 
     public static function providerFailure(
@@ -43,6 +43,7 @@ class ProjectDiscoveryException extends RuntimeException
 
         $value = str_replace($apiKey, '[REDACTED]', $value);
         $value = preg_replace('/AIza[0-9A-Za-z_-]{20,}/', '[REDACTED]', $value) ?? '';
+        $value = preg_replace('/AQ\.[0-9A-Za-z_-]{20,}/', '[REDACTED]', $value) ?? '';
         $value = preg_replace('/(?i)(api[_-]?key|key|token|authorization)\s*[:=]\s*\S+/', '$1=[REDACTED]', $value) ?? '';
         $value = preg_replace('/(?i)bearer\s+\S+/', 'Bearer [REDACTED]', $value) ?? '';
 

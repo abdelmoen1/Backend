@@ -12,6 +12,7 @@ use App\Services\AI\ProjectDiscoveryService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Validator;
 use Illuminate\Validation\Rule;
 use Illuminate\Validation\ValidationException;
@@ -54,14 +55,14 @@ class ProjectDiscoveryController extends Controller
         try {
             $result = $discovery->nextStep($this->projectContext($record, $session));
         } catch (ProjectDiscoveryException $exception) {
-            return response()->json([
-                'success' => false,
-                'message' => $exception->getMessage(),
-            ], 503);
+            return $this->discoveryFailureResponse($exception);
         }
 
         if ($result['status'] === 'question' && $this->repeatsPreviousQuestion($session, $result['question'])) {
-            report('Gemini returned a repeated project discovery question.');
+            Log::warning('Gemini returned a repeated project discovery question.', [
+                'provider' => 'gemini',
+                'session_id' => $session->id,
+            ]);
 
             return response()->json([
                 'success' => false,
@@ -215,6 +216,7 @@ class ProjectDiscoveryController extends Controller
                 ];
             })
             ->all();
+        $latestAnswer = $history === [] ? null : $history[array_key_last($history)];
 
         return [
             'organization' => array_filter([
@@ -233,7 +235,9 @@ class ProjectDiscoveryController extends Controller
                     'existing_tools' => $record->existing_tools ?? [],
                     'deadline' => $record->deadline?->toDateString(),
                     'priority' => $record->priority,
+                    'budget_range' => $record->budget_range,
                 ], fn (mixed $value): bool => $value !== null && $value !== '' && $value !== []),
+                'organization_notes' => $record->intake_data ?? [],
             ],
             'known_requirements' => [
                 'goals' => $record->desired_outcomes ?? [],
@@ -249,6 +253,14 @@ class ProjectDiscoveryController extends Controller
                 'instruction' => 'هذه متطلبات مؤكدة من إجابات المؤسسة فقط. لا تضف إليها استنتاجات أو افتراضات. استخدم سجل history الكامل لمعرفة تسلسل الأسئلة والإجابات وآخر إجابة.',
                 'confirmed_requirements' => $this->confirmedRequirements($session),
             ],
+            'already_asked_questions' => array_map(
+                fn (IntakeResponse $response): array => [
+                    'id' => $response->question_id,
+                    'text_ar' => $response->question_text,
+                ],
+                $session->responses()->get()->all()
+            ),
+            'latest_answer' => $latestAnswer,
             'remaining_unknowns' => [
                 'instruction' => 'استنتج من سياق المشروع وسجل الاكتشاف المعلومات المؤثرة التي لا تزال غير معروفة أو ملتبسة. لا تفترض أن كل مجال أدناه مجهول ولا تسأل عن معلومة حُسمت بالفعل.',
                 'areas_to_assess' => [
@@ -539,6 +551,20 @@ class ProjectDiscoveryController extends Controller
             'success' => false,
             'message' => 'هذا السؤال لم يعد الحالي. يرجى تحديث حالة الاكتشاف والمحاولة مجددًا.',
         ], 409);
+    }
+
+    private function discoveryFailureResponse(ProjectDiscoveryException $exception): JsonResponse
+    {
+        $payload = [
+            'success' => false,
+            'message' => $exception->getMessage(),
+        ];
+
+        if (config('app.debug') && $exception->providerDiagnostic !== null) {
+            $payload['debug'] = $exception->providerDiagnostic;
+        }
+
+        return response()->json($payload, 503);
     }
 
     private function ensureDiscoverable(ProjectRequest $record): ?JsonResponse

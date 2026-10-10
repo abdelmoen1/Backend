@@ -4,7 +4,6 @@ namespace App\Services\AI;
 
 use App\Contracts\AIProvider;
 use Illuminate\Http\Client\ConnectionException;
-use Illuminate\Http\Client\Response;
 use Illuminate\Support\Facades\Log;
 use JsonException;
 
@@ -14,28 +13,42 @@ class ProjectDiscoveryService
 
     public function nextStep(array $projectContext): array
     {
+        $apiKey = is_string(config('services.gemini.api_key'))
+            ? trim((string) config('services.gemini.api_key'))
+            : '';
+
         try {
             $context = json_encode(
                 $projectContext,
                 JSON_UNESCAPED_UNICODE | JSON_THROW_ON_ERROR
             );
 
+            $generationConfig = [
+                'responseMimeType' => 'application/json',
+                'responseSchema' => $this->responseSchema(),
+                'maxOutputTokens' => 2048,
+            ];
+            $thinkingConfig = $this->thinkingConfig();
+            if ($thinkingConfig !== []) {
+                $generationConfig['thinkingConfig'] = $thinkingConfig;
+            }
+
             $response = $this->provider->generateResponse([
                 'systemInstruction' => [
                     'parts' => [[
                         'text' => implode("\n", [
-                            'أنت وكيل اكتشاف المشاريع في GoTraniee، ومهمتك فهم المشكلة التجارية للمؤسسة وتحديد المعلومات الناقصة قبل إعداد تصور للمشروع.',
-                            'اتبع هذه التعليمات في كل دور:',
-                            '1. استخدم عربية أعمال بسيطة ومباشرة، واسأل سؤالًا واحدًا فقط في كل استجابة.',
-                            '2. اعتمد على سياق المؤسسة والمشروع وسجل الأسئلة والإجابات كاملًا. تعامل مع معلومات المؤسسة وإجاباتها، بما فيها الإجابة المخصصة، كحقائق مؤكدة.',
-                            '3. افحص آخر إجابة قبل اختيار السؤال التالي. يجب أن يعتمد السؤال التالي على السياق المحدّث؛ لا تستخدم تسلسلًا عامًا أو سؤال متابعة ثابتًا.',
-                            '4. لا تسأل عن معلومة معروفة أو محسومة، ولا تكرر سؤالًا سابقًا بصياغة مختلفة. اقرأ قيم الاختيارات وتسمياتها العربية معًا.',
-                            '5. اختر الفجوة التي سيؤثر جوابها أكثر في تحديد المشكلة أو المستخدمين أو سير العمل أو النطاق أو القيود أو معيار النجاح. اطلب توضيحًا إذا كانت إجابة مؤثرة ملتبسة.',
-                            '6. استخدم خيارات واضحة وملائمة للمشروع حين يكون الاختيار مناسبًا، وقدّم من 3 إلى 6 خيارات. أضف خيار "أخرى" بقيمة other وallows_custom_text=true عندما يفيد جمع احتياج غير متوقع. الأسئلة النصية والرقمية والتاريخ ونعم/لا لها مصفوفة خيارات فارغة.',
-                            '7. لا تسأل أسئلة تقنية غير لازمة، ولا تخترع متطلبات أو تعرض الافتراضات كحقائق مؤكدة.',
-                            '8. أعد status=complete فقط عندما تتوفر معلومات كافية لصياغة مقترح مشروع مفيد يشرح المشكلة والحل والأهداف والمستخدمين والنطاق والقيود ومعايير النجاح. لا تواصل الأسئلة لجمع تفاصيل قليلة القيمة أو للوصول إلى عدد معين.',
-                            '9. أعد JSON واحدًا فقط مطابقًا للمخطط. في حالة السؤال استخدم question كائنًا واحدًا. في حالة الاكتمال استخدم question=null.',
-                            '10. استخدم structured_understanding بوصفه فهرسًا للحقائق التي أكّدتها المؤسسة فقط، وhistory بوصفه سجلًا كاملًا ومرتبًا للأسئلة والإجابات. لا تضف استنتاجاتك أو افتراضاتك إلى المتطلبات المؤكدة. افحص أحدث إجابة قبل اختيار سؤال جديد، ولا تسأل مجددًا عن معلومة حُسمت في سياق المشروع أو الإجابات.',
+                            'You are the GoTraniee AI Requirement Intake Agent for organizations.',
+                            'Your job is to collect enough structured requirements to later create a Project Proposal.',
+                            'Ask one relevant question at a time. Use simple Arabic business language.',
+                            'Use previous answers as context. Do not repeat a question that has already been asked or answered, even with different wording.',
+                            'Treat organization profile data, project context, custom answers, and "Other" text as confirmed user facts. Never invent requirements. Never promote your own assumptions into confirmed_requirements.',
+                            'Inspect latest_answer and the full ordered history before choosing the next question. The next question must depend on that updated context; do not follow a generic questionnaire sequence.',
+                            'Ask a clarification when an important answer is incomplete or ambiguous.',
+                            'Do not recommend existing commercial software. Do not start designing a technical solution yet.',
+                            'Prefer 3 to 6 clear project-specific options when a choice question fits. Add an "أخرى" option with value other and allows_custom_text=true when an unexpected need is possible. Text, number, date, and yes/no questions must use an empty options array.',
+                            'Do not ask unnecessary technical questions, and do not re-ask information already present in project context or confirmed answers.',
+                            'Set status=complete only when there is enough information for a useful project proposal covering the problem, current process, users, goals, scope, constraints, and success criteria. Do not pad with low-value questions.',
+                            'Return JSON that matches the schema. For a question, set status=question and provide one question object. For completion, set status=complete and omit question or set it to null.',
                         ]),
                     ]],
                 ],
@@ -43,32 +56,37 @@ class ProjectDiscoveryService
                     'role' => 'user',
                     'parts' => [['text' => $context]],
                 ]],
-                'generationConfig' => [
-                    'responseMimeType' => 'application/json',
-                    'responseSchema' => $this->responseSchema(),
-                ],
+                'generationConfig' => $generationConfig,
             ]);
         } catch (AIProviderConfigurationException) {
             Log::error('Gemini project discovery is not configured.', [
                 'provider' => 'gemini',
             ]);
 
-            throw ProjectDiscoveryException::unavailable();
+            throw ProjectDiscoveryException::unavailable([
+                'http_status' => null,
+                'provider_status' => 'NOT_CONFIGURED',
+            ]);
         } catch (ConnectionException) {
             Log::warning('Gemini project discovery connection failed.', [
                 'provider' => 'gemini',
+                'failure' => 'connection',
             ]);
 
-            throw ProjectDiscoveryException::unavailable();
+            throw ProjectDiscoveryException::unavailable([
+                'http_status' => 0,
+                'provider_status' => 'CONNECTION_FAILURE',
+            ]);
         } catch (JsonException) {
             Log::warning('Gemini project discovery context could not be encoded.', [
                 'provider' => 'gemini',
             ]);
 
-            throw ProjectDiscoveryException::unavailable();
+            throw ProjectDiscoveryException::unavailable([
+                'provider_status' => 'CONTEXT_ENCODE_FAILURE',
+            ]);
         }
 
-        $apiKey = (string) config('services.gemini.api_key');
         if ($response->failed()) {
             $providerError = $response->json('error', []);
             $providerError = is_array($providerError) ? $providerError : [];
@@ -93,18 +111,43 @@ class ProjectDiscoveryService
             );
         }
 
-        $structuredOutput = $this->extractStructuredOutput($response);
-        $normalizedOutput = $this->normalizeStructuredOutput($structuredOutput);
+        $extracted = GeminiStructuredOutput::extract($response);
+        $normalizedOutput = $this->normalizeStructuredOutput($extracted['data']);
 
         if ($normalizedOutput === null) {
             Log::warning('Gemini project discovery returned invalid structured output.', [
                 'provider' => 'gemini',
+                'finish_reason' => $extracted['diagnostic']['finish_reason'] ?? null,
+                'parse_error' => $extracted['diagnostic']['parse_error'] ?? 'schema_validation',
+                'candidate_count' => $extracted['diagnostic']['candidate_count'] ?? null,
+                'text_part_count' => $extracted['diagnostic']['text_part_count'] ?? null,
             ]);
 
-            throw ProjectDiscoveryException::unavailable();
+            throw ProjectDiscoveryException::unavailable([
+                'http_status' => $response->status(),
+                'provider_status' => 'INVALID_STRUCTURED_OUTPUT',
+                'parse_error' => $extracted['diagnostic']['parse_error'] ?? 'schema_validation',
+                'finish_reason' => $extracted['diagnostic']['finish_reason'] ?? null,
+            ]);
         }
 
         return $normalizedOutput;
+    }
+
+    private function thinkingConfig(): array
+    {
+        $configured = config('services.gemini.thinking_budget');
+        if ($configured !== null && $configured !== '') {
+            return ['thinkingBudget' => (int) $configured];
+        }
+
+        $model = (string) config('services.gemini.model');
+        // Only force zero thinking budget for known thinking/large models to avoid slowness
+        if (preg_match('/(?:gemini-3\.5|thinking|pro)/i', $model) === 1) {
+            return ['thinkingBudget' => 0];
+        }
+
+        return [];
     }
 
     private function responseSchema(): array
@@ -118,7 +161,6 @@ class ProjectDiscoveryService
                 ],
                 'question' => [
                     'type' => 'OBJECT',
-                    'nullable' => true,
                     'properties' => [
                         'id' => ['type' => 'STRING'],
                         'text_ar' => ['type' => 'STRING'],
@@ -150,69 +192,26 @@ class ProjectDiscoveryService
                     'required' => ['id', 'text_ar', 'type', 'options'],
                 ],
             ],
-            'required' => ['status', 'question'],
+            'required' => ['status'],
         ];
-    }
-
-    private function extractStructuredOutput(Response $response): mixed
-    {
-        $body = $response->json();
-        if (! is_array($body) || ! is_array($body['candidates'] ?? null)) {
-            return null;
-        }
-
-        $candidates = $body['candidates'];
-        if (count($candidates) !== 1 || ! is_array($candidates[0] ?? null)) {
-            return null;
-        }
-
-        $parts = $candidates[0]['content']['parts'] ?? null;
-        if (! is_array($parts)) {
-            return null;
-        }
-
-        $texts = [];
-        foreach ($parts as $part) {
-            if (
-                is_array($part)
-                && ($part['thought'] ?? false) !== true
-                && is_string($part['text'] ?? null)
-            ) {
-                $texts[] = $part['text'];
-            }
-        }
-
-        if (count($texts) !== 1) {
-            return null;
-        }
-
-        try {
-            return json_decode($texts[0], true, flags: JSON_THROW_ON_ERROR);
-        } catch (JsonException) {
-            return null;
-        }
     }
 
     private function normalizeStructuredOutput(mixed $output): ?array
     {
-        if (
-            ! is_array($output)
-            || array_is_list($output)
-            || ! $this->hasExactKeys($output, ['status', 'question'])
-        ) {
+        if (! is_array($output) || array_is_list($output) || ! isset($output['status'])) {
             return null;
         }
 
-        if ($output['status'] === 'complete' && $output['question'] === null) {
+        if ($output['status'] === 'complete') {
             return ['status' => 'complete'];
         }
 
-        $question = $output['question'];
+        $question = $output['question'] ?? null;
         if (
             $output['status'] !== 'question'
             || ! is_array($question)
             || array_is_list($question)
-            || ! $this->hasExactKeys($question, ['id', 'text_ar', 'type', 'options'])
+            || ! $this->hasRequiredKeys($question, ['id', 'text_ar', 'type', 'options'])
             || ! is_string($question['id'])
             || trim($question['id']) === ''
             || strlen($question['id']) > 255
@@ -246,11 +245,12 @@ class ProjectDiscoveryService
             return null;
         }
 
+        $normalizedOptions = [];
         foreach ($question['options'] as $option) {
             if (
                 ! is_array($option)
                 || array_is_list($option)
-                || ! $this->hasExactKeys($option, [
+                || ! $this->hasRequiredKeys($option, [
                     'label_ar',
                     'value',
                     'allows_custom_text',
@@ -261,30 +261,67 @@ class ProjectDiscoveryService
                 || ! is_string($option['value'])
                 || trim($option['value']) === ''
                 || strlen($option['value']) > 255
-                || ! is_bool($option['allows_custom_text'])
-                || ($option['value'] === 'other' && ! $option['allows_custom_text'])
             ) {
                 return null;
             }
+
+            $allowsCustomText = $this->booleanValue($option['allows_custom_text']);
+            if ($allowsCustomText === null) {
+                return null;
+            }
+
+            if ($option['value'] === 'other' && ! $allowsCustomText) {
+                return null;
+            }
+
+            $normalizedOptions[] = [
+                'label_ar' => $option['label_ar'],
+                'value' => $option['value'],
+                'allows_custom_text' => $allowsCustomText,
+            ];
         }
 
-        $optionValues = array_column($question['options'], 'value');
+        $optionValues = array_column($normalizedOptions, 'value');
         if (count($optionValues) !== count(array_unique($optionValues))) {
             return null;
         }
 
         return [
             'status' => 'question',
-            'question' => $question,
+            'question' => [
+                'id' => trim($question['id']),
+                'text_ar' => trim($question['text_ar']),
+                'type' => $question['type'],
+                'options' => $normalizedOptions,
+            ],
         ];
     }
 
-    private function hasExactKeys(array $value, array $keys): bool
+    private function hasRequiredKeys(array $value, array $keys): bool
     {
-        $actualKeys = array_keys($value);
-        sort($actualKeys);
-        sort($keys);
+        foreach ($keys as $key) {
+            if (! array_key_exists($key, $value)) {
+                return false;
+            }
+        }
 
-        return $actualKeys === $keys;
+        return true;
+    }
+
+    private function booleanValue(mixed $value): ?bool
+    {
+        if (is_bool($value)) {
+            return $value;
+        }
+
+        if ($value === 0 || $value === 1) {
+            return (bool) $value;
+        }
+
+        if ($value === 'true' || $value === 'false') {
+            return $value === 'true';
+        }
+
+        return null;
     }
 }
