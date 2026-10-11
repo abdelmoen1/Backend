@@ -34,6 +34,7 @@ class UpdateProjectRequestRequest extends FormRequest
             'intake_data.other_process' => ['sometimes', 'nullable', 'string', 'max:255'],
             'intake_data.other_user' => ['sometimes', 'nullable', 'string', 'max:255'],
             'intake_data.expected_outcome' => ['sometimes', 'nullable', 'string', 'max:2000'],
+            'intake_data.short_title' => ['sometimes', 'nullable', 'string', 'max:255'],
         ];
     }
 }

@@ -74,6 +74,44 @@ class ProjectRequestFlowTest extends TestCase
         ])->assertNotFound();
     }
 
+    public function test_organization_can_delete_only_its_own_deletable_request(): void
+    {
+        $owner = $this->organization('delete-owner@example.com');
+        $other = $this->organization('delete-other@example.com');
+        $projectRequest = $owner->organizationProfile->projectRequests()->create([
+            'title' => 'Request to delete',
+        ]);
+        $session = $projectRequest->intakeSession()->create(['current_state' => []]);
+        $session->responses()->create([
+            'sequence' => 1,
+            'question_id' => 'q1',
+            'question_text' => 'سؤال',
+            'question_type' => 'short_text',
+            'options' => [],
+        ]);
+        $converted = $owner->organizationProfile->projectRequests()->create([
+            'title' => 'Converted request',
+            'status' => ProjectRequestStatus::CONVERTED_TO_OPPORTUNITY,
+        ]);
+
+        $this->actingAs($other, 'sanctum')
+            ->deleteJson("/api/organization/project-requests/{$projectRequest->id}")
+            ->assertNotFound();
+        $this->assertDatabaseHas('project_requests', ['id' => $projectRequest->id]);
+
+        $this->actingAs($owner, 'sanctum')
+            ->deleteJson("/api/organization/project-requests/{$converted->id}")
+            ->assertUnprocessable();
+        $this->assertDatabaseHas('project_requests', ['id' => $converted->id]);
+
+        $this->deleteJson("/api/organization/project-requests/{$projectRequest->id}")
+            ->assertOk()
+            ->assertJsonPath('success', true);
+        $this->assertDatabaseMissing('project_requests', ['id' => $projectRequest->id]);
+        $this->assertDatabaseMissing('intake_sessions', ['id' => $session->id]);
+        $this->assertDatabaseMissing('intake_responses', ['intake_session_id' => $session->id]);
+    }
+
     public function test_project_context_is_saved_on_project_request_and_proposal_can_be_approved(): void
     {
         $organization = $this->organization('project-context@example.com');

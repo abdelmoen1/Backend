@@ -16,6 +16,9 @@ class StoreProjectRequestRequest extends FormRequest
     {
         return [
             'title' => ['required', 'string', 'max:255'],
+            'problem_description' => ['sometimes', 'nullable', 'string', 'min:10', 'max:10000'],
+            'intake_data' => ['sometimes', 'array:short_title'],
+            'intake_data.short_title' => ['sometimes', 'nullable', 'string', 'max:255'],
         ];
     }
 }

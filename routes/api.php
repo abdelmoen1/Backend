@@ -46,6 +46,7 @@ Route::middleware('auth:sanctum')->group(function () {
         Route::post('/', [ProjectRequestController::class, 'store']);
         Route::get('/{projectRequest}', [ProjectRequestController::class, 'show']);
         Route::patch('/{projectRequest}', [ProjectRequestController::class, 'update']);
+        Route::delete('/{projectRequest}', [ProjectRequestController::class, 'destroy']);
         Route::post('/{projectRequest}/next-question', [ProjectDiscoveryController::class, 'nextQuestion']);
         Route::post('/{projectRequest}/answer', [ProjectDiscoveryController::class, 'answer']);
         Route::post('/{projectRequest}/analyze', [ProjectRequestController::class, 'analyze']);

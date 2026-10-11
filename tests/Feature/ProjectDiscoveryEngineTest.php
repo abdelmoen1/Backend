@@ -92,6 +92,56 @@ class ProjectDiscoveryEngineTest extends TestCase
         $this->assertSame('إدارة القضايا والعملاء', $contexts[2]['project']['problem']);
     }
 
+    public function test_problem_form_context_is_saved_and_sent_to_gemini(): void
+    {
+        $organization = $this->organization('problem-form@example.test', 'متجر');
+        $contexts = [];
+
+        Http::fake(function (Request $request) use (&$contexts) {
+            $contexts[] = json_decode($request['contents'][0]['parts'][0]['text'], true);
+
+            return Http::response($this->geminiResponse([
+                'status' => 'question',
+                'question' => $this->question('order_channel', 'كيف تستقبلون طلبات العملاء اليوم؟'),
+            ]));
+        });
+
+        $this->actingAs($organization, 'sanctum')
+            ->postJson('/api/organization/project-requests', [
+                'title' => 'نظام الطلبات',
+                'problem_description' => 'قصير',
+                'intake_data' => ['short_title' => 'عنوان', 'unexpected' => 'x'],
+            ])
+            ->assertUnprocessable()
+            ->assertJsonValidationErrors(['problem_description', 'intake_data']);
+
+        $created = $this->postJson('/api/organization/project-requests', [
+            'title' => 'نظام الطلبات',
+            'problem_description' => 'نفقد طلبات العملاء لأننا نتابعها عبر واتساب يدويًا.',
+            'intake_data' => ['short_title' => 'صعوبة متابعة طلبات العملاء'],
+        ])
+            ->assertCreated()
+            ->assertJsonPath('data.title', 'نظام الطلبات')
+            ->assertJsonPath('data.intake_data.short_title', 'صعوبة متابعة طلبات العملاء')
+            ->assertJsonPath('data.status', ProjectRequestStatus::DRAFT);
+
+        $this->postJson("/api/organization/project-requests/{$created->json('data.id')}/next-question")
+            ->assertOk()
+            ->assertJsonPath('data.status', 'question')
+            ->assertJsonPath('data.question.id', 'order_channel');
+
+        $this->assertCount(1, $contexts);
+        $this->assertSame('نظام الطلبات', $contexts[0]['project']['title']);
+        $this->assertSame(
+            'نفقد طلبات العملاء لأننا نتابعها عبر واتساب يدويًا.',
+            $contexts[0]['project']['problem']
+        );
+        $this->assertSame(
+            'صعوبة متابعة طلبات العملاء',
+            $contexts[0]['project']['organization_notes']['short_title']
+        );
+    }
+
     public function test_other_custom_answer_is_included_in_the_next_ai_context(): void
     {
         $organization = $this->organization('custom-answer@example.test', 'عيادة');

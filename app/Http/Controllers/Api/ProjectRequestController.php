@@ -99,6 +99,29 @@ class ProjectRequestController extends Controller
         ]);
     }
 
+    public function destroy(Request $request, int $projectRequest): JsonResponse
+    {
+        if ($response = $this->organizationOnly($request)) {
+            return $response;
+        }
+
+        $record = $this->ownedRequest($request, $projectRequest);
+        if ($record->status === ProjectRequestStatus::CONVERTED_TO_OPPORTUNITY) {
+            return response()->json([
+                'success' => false,
+                'message' => 'لا يمكن حذف طلب تحول إلى فرصة.',
+            ], 422);
+        }
+
+        // جلسة الاكتشاف وإجاباتها تُحذف تلقائيًا عبر cascadeOnDelete
+        $record->delete();
+
+        return response()->json([
+            'success' => true,
+            'message' => 'تم حذف المشروع بنجاح.',
+        ]);
+    }
+
     public function analyze(
         Request $request,
         int $projectRequest,

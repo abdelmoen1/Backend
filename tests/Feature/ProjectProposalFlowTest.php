@@ -44,6 +44,25 @@ class ProjectProposalFlowTest extends TestCase
             ->assertJsonPath('data.proposal.milestones.1.title', 'التطوير');
     }
 
+    public function test_reading_a_request_without_proposal_never_generates_one(): void
+    {
+        $organization = $this->organization('no-proposal@example.test');
+        $projectRequest = $this->completedProject($organization, 'Clinic appointments');
+        $generator = \Mockery::mock(ProjectProposalGenerator::class);
+        $generator->shouldNotReceive('generate');
+        $this->app->instance(ProjectProposalGenerator::class, $generator);
+        Http::fake();
+
+        $this->actingAs($organization, 'sanctum')
+            ->getJson("/api/organization/project-requests/{$projectRequest->id}")
+            ->assertOk()
+            ->assertJsonPath('data.id', $projectRequest->id)
+            ->assertJsonPath('data.proposal', null);
+
+        $this->getJson('/api/organization/project-requests/999999')->assertNotFound();
+        Http::assertNothingSent();
+    }
+
     public function test_canonical_project_discovery_proposal_revision_and_approval_flow(): void
     {
         $organization = $this->organization('canonical-flow@example.test');
