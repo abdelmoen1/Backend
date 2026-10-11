@@ -12,31 +12,24 @@ use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Validation\ValidationException;
 use App\Http\Requests\LoginRequest;
-use App\Models\StudentProfile;
-use App\Models\OrganizationProfile;
 
 class AuthController extends Controller
 {
     public function register(RegisterRequest $request)
     {
 
-        $user = User::create([
-            'name' => $request->name,
-            'email' => $request->email,
-            'password' => Hash::make($request->password),
-            'role' => $request->role,
-        ]);
-        if ($request->role === 'student') {
-            StudentProfile::create([
-                'user_id' => $user->id,
+        // المستخدم وملفه ينشآن معًا أو لا ينشآن، حتى لا يبقى بريد محجوز بحساب ناقص
+        [$user, $token] = DB::transaction(function () use ($request): array {
+            $user = User::create([
+                'name' => $request->name,
+                'email' => $request->email,
+                'password' => Hash::make($request->password),
+                'role' => $request->role,
             ]);
-        }
-        if ($request->role === 'organization') {
-            OrganizationProfile::create([
-                'user_id' => $user->id,
-            ]);
-        }
-        $token = $user->createToken('auth_token')->plainTextToken;
+            $user->ensureRoleProfile();
+
+            return [$user, $user->createToken('auth_token')->plainTextToken];
+        });
 
         return response()->json([
             'message' => 'تم إنشاء الحساب بنجاح',
@@ -52,7 +45,7 @@ class AuthController extends Controller
 
         if (! $user || ! $user->password || ! Hash::check($validated['password'], $user->password)) {
             throw ValidationException::withMessages([
-                'email' => ['بيانات الدخول غير صحيحة.'],
+                'email' => ['البريد الإلكتروني أو كلمة المرور غير صحيحة.'],
             ]);
         }
 

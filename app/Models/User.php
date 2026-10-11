@@ -51,6 +51,20 @@ class User extends Authenticatable
         ];
     }
 
+    /**
+     * ينشئ الملف المرتبط بدور المستخدم (طالب أو مؤسسة) إن لم يكن موجودًا.
+     */
+    public function ensureRoleProfile(): void
+    {
+        if ($this->role === 'student') {
+            StudentProfile::firstOrCreate(['user_id' => $this->id]);
+        }
+
+        if ($this->role === 'organization') {
+            OrganizationProfile::firstOrCreate(['user_id' => $this->id]);
+        }
+    }
+
     public function studentProfile(): HasOne
     {
         return $this->hasOne(StudentProfile::class);

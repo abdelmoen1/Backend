@@ -23,4 +23,24 @@ class RegisterRequest extends FormRequest
             'role' => ['required', Rule::in(['student', 'organization'])],
         ];
     }
+
+    public function messages(): array
+    {
+        return [
+            'name.required' => 'الاسم مطلوب.',
+            'name.max' => 'الاسم يجب ألا يتجاوز 255 حرفًا.',
+            'email.required' => 'البريد الإلكتروني مطلوب.',
+            'email.email' => 'صيغة البريد الإلكتروني غير صحيحة.',
+            'email.max' => 'البريد الإلكتروني يجب ألا يتجاوز 255 حرفًا.',
+            'email.unique' => 'هذا البريد الإلكتروني مسجّل مسبقًا.',
+            'password.required' => 'كلمة المرور مطلوبة.',
+            'password.min' => 'كلمة المرور يجب أن تكون 8 أحرف على الأقل.',
+            'password.password.letters' => 'كلمة المرور يجب أن تحتوي على حرف واحد على الأقل.',
+            'password.password.numbers' => 'كلمة المرور يجب أن تحتوي على رقم واحد على الأقل.',
+            'password_confirmation.required' => 'تأكيد كلمة المرور مطلوب.',
+            'password_confirmation.same' => 'تأكيد كلمة المرور غير مطابق.',
+            'role.required' => 'نوع الحساب مطلوب.',
+            'role.in' => 'نوع الحساب غير صالح.',
+        ];
+    }
 }
