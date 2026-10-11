@@ -11,6 +11,7 @@ use App\Http\Requests\UpdateProjectRequestRequest;
 use App\Http\Resources\ProjectRequestResource;
 use App\Models\IntakeSession;
 use App\Models\ProjectRequest;
+use App\Services\AI\DiscoveryRequirements;
 use App\Services\AI\ProjectProposalException;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -91,7 +92,18 @@ class ProjectRequestController extends Controller
             $intakeData
         );
         $record->status = ProjectRequestStatus::INTAKE_IN_PROGRESS;
+        $formChanged = $record->isDirty(['title', 'problem_description'])
+            || ($record->getOriginal('intake_data')['short_title'] ?? null) !== ($record->intake_data['short_title'] ?? null);
         $record->save();
+
+        // تعديل نموذج المشكلة بعد بدء المحادثة يُعاد استخراجه في الدور التالي حتى تتحدث المتطلبات
+        $session = $record->intakeSession;
+        if ($formChanged && $session && DiscoveryRequirements::isTracked($session->current_state)) {
+            $state = $session->current_state;
+            $state['requirements']['form_processed'] = false;
+            $session->current_state = $state;
+            $session->save();
+        }
 
         return response()->json([
             'success' => true,
@@ -156,7 +168,8 @@ class ProjectRequestController extends Controller
             ], 422);
         }
 
-        if ($record->intakeSession?->status !== IntakeSession::STATUS_COMPLETED) {
+        $session = $record->intakeSession;
+        if (! $this->readyForProposal($record, $session)) {
             return response()->json([
                 'success' => false,
                 'message' => 'يرجى إكمال اكتشاف احتياج المشروع قبل إعداد المقترح.',
@@ -166,13 +179,14 @@ class ProjectRequestController extends Controller
         try {
             $proposal = $proposalGenerator->generate($record);
         } catch (ProjectProposalException $exception) {
+            // فشل التوليد لا يغيّر الجلسة ولا المقترح السابق
             return response()->json([
                 'success' => false,
                 'message' => $exception->getMessage(),
             ], 503);
         }
 
-        $record = DB::transaction(function () use ($record, $proposal): ProjectRequest {
+        $record = DB::transaction(function () use ($record, $session, $proposal): ProjectRequest {
             $locked = ProjectRequest::query()
                 ->whereKey($record->id)
                 ->lockForUpdate()
@@ -187,6 +201,22 @@ class ProjectRequestController extends Controller
             $locked->status = ProjectRequestStatus::PROPOSAL_READY;
             $locked->revision_note = null;
             $locked->save();
+
+            // المقترح الجاهز يعني أن الاكتشاف مكتمل؛ السؤال المفتوح (عند الإنهاء المبكر) يُعلَّم كمتجاوز ولا يُحذف
+            $lockedSession = IntakeSession::query()->whereKey($session->id)->lockForUpdate()->first();
+            if ($lockedSession && $lockedSession->status !== IntakeSession::STATUS_COMPLETED) {
+                $state = $lockedSession->current_state ?? [];
+                if ($lockedSession->current_question_id) {
+                    $state['skipped_questions'] = array_values(array_unique(array_merge(
+                        is_array($state['skipped_questions'] ?? null) ? $state['skipped_questions'] : [],
+                        [$lockedSession->current_question_id]
+                    )));
+                }
+                $lockedSession->status = IntakeSession::STATUS_COMPLETED;
+                $lockedSession->current_question_id = null;
+                $lockedSession->current_state = $state;
+                $lockedSession->save();
+            }
 
             return $locked->fresh();
         });
@@ -265,14 +295,84 @@ class ProjectRequestController extends Controller
             ], 422);
         }
 
-        $record->revision_note = $request->validated('note');
-        $record->status = ProjectRequestStatus::REVISION_REQUESTED;
-        $record->save();
+        $session = $record->intakeSession;
+        if ($session && $this->hasPendingQuestion($session)) {
+            return response()->json([
+                'success' => false,
+                'message' => 'لدى المساعد سؤال مفتوح في المحادثة. أجب عنه أولًا ثم أرسل التعديل.',
+            ], 409);
+        }
+
+        $note = trim((string) $request->validated('note'));
+
+        DB::transaction(function () use ($record, $session, $note): void {
+            $record->revision_note = $note;
+            $record->status = ProjectRequestStatus::REVISION_REQUESTED;
+            $record->save();
+
+            if (! $session) {
+                return;
+            }
+
+            // طلب التعديل يُضاف إلى نفس المحادثة كرسالة من المؤسسة، فيكمل المساعد من حيث توقف
+            $lockedSession = IntakeSession::query()->whereKey($session->id)->lockForUpdate()->firstOrFail();
+            $sequence = (int) $lockedSession->responses()->max('sequence') + 1;
+            $turn = $lockedSession->responses()->create([
+                'sequence' => $sequence,
+                'question_id' => ProjectDiscoveryController::REVISION_PREFIX.$sequence,
+                'question_text' => 'ما الذي تريد تعديله أو توضيحه في المقترح؟',
+                'question_type' => 'long_text',
+                'options' => [],
+                'selected_answer' => $note,
+                'answered_at' => now(),
+            ]);
+
+            $state = $lockedSession->current_state ?? [];
+            $state['confirmed_requirements'] = DiscoveryRequirements::appendConfirmedAnswer(
+                $state['confirmed_requirements'] ?? [],
+                $turn
+            );
+            $lockedSession->status = IntakeSession::STATUS_ACTIVE;
+            $lockedSession->current_question_id = null;
+            $lockedSession->current_state = $state;
+            $lockedSession->save();
+        });
 
         return response()->json([
             'success' => true,
             'data' => new ProjectRequestResource($record->fresh()),
         ]);
+    }
+
+    /**
+     * يمكن إعداد المقترح عندما: اكتمل الاكتشاف، أو سُجل طلب تعديل دون سؤال مفتوح
+     * (المسار المباشر الحالي)، أو غطت الحالة المنظمة كل المحاور الأساسية (إنهاء مبكر بطلب المؤسسة).
+     */
+    private function readyForProposal(ProjectRequest $record, ?IntakeSession $session): bool
+    {
+        if (! $session) {
+            return false;
+        }
+
+        if ($session->status === IntakeSession::STATUS_COMPLETED) {
+            return true;
+        }
+
+        if ($record->status === ProjectRequestStatus::REVISION_REQUESTED && ! $this->hasPendingQuestion($session)) {
+            return true;
+        }
+
+        return DiscoveryRequirements::isReady($session->current_state);
+    }
+
+    private function hasPendingQuestion(IntakeSession $session): bool
+    {
+        return $session->status !== IntakeSession::STATUS_COMPLETED
+            && $session->current_question_id !== null
+            && $session->responses()
+                ->where('question_id', $session->current_question_id)
+                ->whereNull('answered_at')
+                ->exists();
     }
 
     private function projectRequestResponse(

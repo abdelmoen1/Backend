@@ -123,6 +123,20 @@ class GeminiProjectProposalGenerator implements ProjectProposalGenerator
                 ],
                 'required' => ['functional_requirements', 'non_functional_considerations'],
             ],
+            // أقسام اختيارية: تُحذف عند غياب الأساس بدل اختلاق قيم
+            'risks' => ['type' => 'ARRAY', 'items' => ['type' => 'STRING']],
+            'payment_schedule' => [
+                'type' => 'ARRAY',
+                'items' => [
+                    'type' => 'OBJECT',
+                    'properties' => [
+                        'milestone' => ['type' => 'STRING'],
+                        'share' => ['type' => 'STRING'],
+                        'notes' => ['type' => 'STRING'],
+                    ],
+                    'required' => ['milestone', 'share', 'notes'],
+                ],
+            ],
         ],
         'required' => [
             'project_overview',
@@ -173,6 +187,12 @@ class GeminiProjectProposalGenerator implements ProjectProposalGenerator
                             'قدّم مدة وتكلفة كنطاقين مبدئيين غير ملزمين، وابدأ نص التكلفة بالعبارة "تقدير مبدئي". لا تقدّمها كسعر ملزم. لا تخترع أسعارًا محلية دقيقة دون أساس؛ وضّح ما يلزم تأكيده.',
                             'قدّر التكاليف التشغيلية ذات الصلة مثل الاستضافة والنطاق والواجهات الخارجية والصيانة، واذكر عند تعذر التقدير أنها تحتاج إلى تأكيد.',
                             'أدرج القرارات الناقصة أو الغامضة ضمن needs_confirmation، ولا تحوّلها إلى حقائق أو افتراضات مؤكدة.',
+                            'المصدر الأساسي هو structured_requirements المجمعة من المحادثة كاملة وليس آخر رسالة: البنود من نوع fact حقائق، وassumption افتراضات تذكرها في assumptions، وunknown معلومات لم تحددها المؤسسة فلا تخترع لها قيمًا، وopen_question وcontradiction تُدرج في needs_confirmation أو risks. استخدم أيضًا unincorporated_organization_input لأنها أحدث مدخلات المؤسسة.',
+                            'اربط كل ميزة رئيسية في functional_scope باحتياج مذكور أو بافتراض صريح، واعرض الميزات الاختيارية كمرحلة لاحقة. لا تُبقِ ميزة استبعدتها المؤسسة.',
+                            'افصل تكلفة التطوير لمرة واحدة (estimated_cost) عن التكاليف التشغيلية المتكررة (operational_cost). إن كانت الميزانية غير محددة فلا تفترض قيمة لها، واذكر أساس التقدير وما يلزم تأكيده.',
+                            'المدة تقدير مبني على النطاق وليست التزامًا؛ إن ذكرت المؤسسة موعدًا فوضّح هل يبدو واقعيًا دون ضمانه.',
+                            'risks اختياري: المخاطر والاعتماديات المهمة فقط. payment_schedule اختياري: أدرجه فقط عند وجود تقدير تكلفة، كجدول دفعات مقترح مرتبط بالمراحل، وإلا فاحذفه.',
+                            'إذا وُجد revision_request فطبّق التعديل المطلوب على النطاق والمراحل والمدة والتكلفة والتشغيل بما يتسق مع المتطلبات المحدثة، دون أرقام غير مبررة.',
                             'أعد جميع أقسام المخطط. اكتب JSON صالحًا مطابقًا للمخطط فقط، دون Markdown أو نص إضافي.',
                         ]),
                     ]],
@@ -241,6 +261,20 @@ class GeminiProjectProposalGenerator implements ProjectProposalGenerator
             ->values()
             ->all() ?? [];
 
+        $currentState = $projectRequest->intakeSession?->current_state ?? [];
+        $requirements = DiscoveryRequirements::from($currentState);
+        // إجابات/طلبات تعديل لم تُستخرج بعد إلى الحالة المنظمة (مثل تعديل أُرسل ثم طُلب المقترح مباشرة)
+        $unincorporated = ! DiscoveryRequirements::isTracked($currentState) ? [] : $projectRequest->intakeSession?->responses
+            ->whereNotNull('answered_at')
+            ->filter(fn (IntakeResponse $response): bool => $response->sequence > $requirements['processed_through'])
+            ->map(fn (IntakeResponse $response): array => [
+                'question' => $response->question_text,
+                'answer' => $this->displayAnswer($response),
+                'custom_answer' => $response->custom_answer,
+            ])
+            ->values()
+            ->all() ?? [];
+
         return [
             'organization' => array_filter([
                 'name' => $projectRequest->organization?->organization_name,
@@ -268,10 +302,31 @@ class GeminiProjectProposalGenerator implements ProjectProposalGenerator
                 'confirmed_discovery_answers' => $projectRequest->intakeSession?->current_state['confirmed_requirements']
                     ?? $history,
             ],
-            'assumptions' => [],
-            'unresolved_questions' => $projectRequest->intake_data['unresolved_questions'] ?? [],
+            // المصدر الأساسي: المتطلبات المنظمة التراكمية (حقائق/افتراضات/مجهولات/نقاط مفتوحة)
+            'structured_requirements' => DiscoveryRequirements::isTracked($currentState)
+                ? DiscoveryRequirements::forPrompt($requirements)
+                : null,
+            'unincorporated_organization_input' => $unincorporated,
+            'assumptions' => $this->itemsOfKind($requirements, 'assumption'),
+            'unresolved_questions' => array_values(array_merge(
+                $projectRequest->intake_data['unresolved_questions'] ?? [],
+                $this->itemsOfKind($requirements, 'open_question'),
+                $this->itemsOfKind($requirements, 'contradiction')
+            )),
+            'unknown_information' => $this->itemsOfKind($requirements, 'unknown'),
             'revision_request' => $projectRequest->revision_note,
         ];
+    }
+
+    private function itemsOfKind(array $requirements, string $kind): array
+    {
+        return array_values(array_map(
+            fn (array $item): string => (DiscoveryRequirements::AREAS[$item['area']] ?? $item['area']).': '.$item['text'],
+            array_filter(
+                DiscoveryRequirements::activeItems($requirements),
+                fn (array $item): bool => $item['kind'] === $kind
+            )
+        ));
     }
 
     private function displayAnswer(IntakeResponse $response): mixed
@@ -384,7 +439,36 @@ class GeminiProjectProposalGenerator implements ProjectProposalGenerator
             }
         }
 
+        // الأقسام الاختيارية: قيمة غير صالحة تُحذف وحدها ولا تُسقط المقترح
+        if (array_key_exists('risks', $proposal) && ! $this->validStringList($proposal['risks'], 1)) {
+            unset($proposal['risks']);
+        }
+        if (array_key_exists('payment_schedule', $proposal) && ! $this->validPaymentSchedule($proposal['payment_schedule'])) {
+            unset($proposal['payment_schedule']);
+        }
+
         return $proposal;
+    }
+
+    private function validPaymentSchedule(mixed $items): bool
+    {
+        if (! is_array($items) || ! array_is_list($items) || $items === [] || count($items) > 12) {
+            return false;
+        }
+
+        foreach ($items as $item) {
+            if (
+                ! is_array($item)
+                || ! is_string($item['milestone'] ?? null) || trim($item['milestone']) === ''
+                || ! is_string($item['share'] ?? null) || trim($item['share']) === ''
+                || ! is_string($item['notes'] ?? '')
+                || mb_strlen($item['milestone'].$item['share'].($item['notes'] ?? '')) > 2000
+            ) {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     private function validStringList(mixed $items, int $minimum): bool

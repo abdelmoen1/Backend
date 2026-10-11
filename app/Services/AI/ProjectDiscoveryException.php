@@ -28,7 +28,11 @@ class ProjectDiscoveryException extends RuntimeException
             ? null
             : self::sanitize($providerMessage, $apiKey);
 
-        return new self('تعذر التواصل مع خدمة الذكاء الاصطناعي حاليًا.', [
+        $userMessage = $httpStatus === 429
+            ? 'خدمة الذكاء الاصطناعي مشغولة حاليًا بسبب كثرة الطلبات. انتظر قليلًا ثم أعد المحاولة؛ إجاباتك محفوظة.'
+            : 'تعذر التواصل مع خدمة الذكاء الاصطناعي حاليًا.';
+
+        return new self($userMessage, [
             'http_status' => $httpStatus,
             'provider_status' => self::sanitizeValue($providerStatus),
             'provider_message' => $message,
