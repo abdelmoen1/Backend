@@ -13,11 +13,13 @@ use App\Models\IntakeSession;
 use App\Models\ProjectRequest;
 use App\Services\AI\DiscoveryRequirements;
 use App\Services\AI\ProjectProposalException;
+use App\Services\Assessments\SkillLevels;
 use App\Services\Projects\ProposalApprovalException;
 use App\Services\Projects\ProposalPublisher;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Validation\Rule;
 
 class ProjectRequestController extends Controller
 {
@@ -241,15 +243,27 @@ class ProjectRequestController extends Controller
         }
 
         $record = $this->ownedRequest($request, $projectRequest);
-        // الأدوار والمهارات يقترحها الذكاء الاصطناعي؛ لا تُنشر قبل أن تؤكدها المؤسسة صراحة
-        $request->validate([
+        // الأدوار والمهارات ومستوياتها يقترحها الذكاء الاصطناعي؛ لا تُنشر قبل أن تؤكدها المؤسسة صراحة،
+        // بما في ذلك المستوى الأدنى لكل مهارة إلزامية (role = ترتيب الدور في staffing.roles)
+        $validated = $request->validate([
             'confirm_requirements' => ['accepted'],
+            'role_skill_levels' => ['present', 'array'],
+            'role_skill_levels.*.role' => ['required', 'integer', 'min:0'],
+            'role_skill_levels.*.skill_id' => ['required', 'integer'],
+            'role_skill_levels.*.level' => ['required', 'string', Rule::in(SkillLevels::ALL)],
         ], [
             'confirm_requirements.accepted' => 'يرجى تأكيد مراجعة الأدوار والمهارات المطلوبة قبل اعتماد المقترح.',
+            'role_skill_levels.present' => 'حدد المستوى الأدنى المطلوب لكل مهارة إلزامية قبل الاعتماد.',
+            'role_skill_levels.array' => 'حدد المستوى الأدنى المطلوب لكل مهارة إلزامية قبل الاعتماد.',
+            'role_skill_levels.*.level.in' => 'اختر مستوى صالحًا: مبتدئ أو متوسط أو متقدم.',
         ]);
 
         try {
-            $publisher->approve($record, $request->user());
+            $publisher->approve($record, $request->user(), array_map(fn (array $entry): array => [
+                'role' => (int) $entry['role'],
+                'skill_id' => (int) $entry['skill_id'],
+                'level' => $entry['level'],
+            ], $validated['role_skill_levels']));
         } catch (ProposalApprovalException $exception) {
             return response()->json([
                 'success' => false,

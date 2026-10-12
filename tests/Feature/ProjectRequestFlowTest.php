@@ -161,7 +161,7 @@ class ProjectRequestFlowTest extends TestCase
             ->assertJsonPath('data.proposal.project_overview.project_name', 'نظام إدارة مواعيد العيادة')
             ->assertJsonPath('data.proposal.estimated_cost', 'تقدير مبدئي: يحدد بعد اعتماد النطاق');
 
-        $this->postJson("/api/organization/project-requests/{$projectRequest->id}/approve", ['confirm_requirements' => true])
+        $this->postJson("/api/organization/project-requests/{$projectRequest->id}/approve", ProjectProposalFixture::approval())
             ->assertOk()
             ->assertJsonPath('data.status', ProjectRequestStatus::CONVERTED_TO_OPPORTUNITY);
 

@@ -4,6 +4,7 @@ namespace App\Http\Resources;
 
 use App\Models\ProjectRole;
 use App\Models\ProjectRoleSkill;
+use App\Services\Assessments\SkillLevels;
 use App\Services\Projects\OpportunityMatcher;
 use App\Services\Projects\ProjectStaffing;
 use App\Services\Projects\ProposalPublisher;
@@ -71,9 +72,22 @@ class ProjectRequestResource extends JsonResource
                 'title' => $role->title,
                 'headcount' => $role->headcount,
                 'mandatory_skills' => $this->skillNames($role, ProjectRoleSkill::MANDATORY),
+                'mandatory_requirements' => $role->skills
+                    ->where('importance', ProjectRoleSkill::MANDATORY)
+                    ->map(fn (ProjectRoleSkill $skill): array => [
+                        'name' => $skill->skill->name,
+                        'min_level' => $skill->min_level,
+                        'min_level_label' => SkillLevels::label($skill->min_level),
+                    ])
+                    ->values()
+                    ->all(),
                 'desirable_skills' => $this->skillNames($role, ProjectRoleSkill::DESIRABLE),
                 'eligible_students' => $counts[$role->id] ?? 0,
             ])->all();
+            // نسخة نُشرت قبل إضافة المستويات: تتطلب "أي مستوى مُثبت" حتى تعيد المؤسسة الاعتماد بمستويات مؤكدة
+            $publication['levels_confirmed'] = $version->roles->every(
+                fn (ProjectRole $role): bool => $role->skills->where('importance', ProjectRoleSkill::MANDATORY)->every(fn (ProjectRoleSkill $skill): bool => $skill->min_level !== null)
+            );
         }
 
         return $publication;

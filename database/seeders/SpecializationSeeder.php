@@ -54,7 +54,7 @@ class SpecializationSeeder extends Seeder
         ],
         'mobile_development' => [
             'title' => 'Mobile App',
-            'name' => 'تطوير تطبيقات الجوال',
+            'name' => 'تطوير تطبيقات الجوال (Mobile App)',
             'description' => 'بناء تطبيقات Android و iOS الأصلية أو متعددة المنصات.',
             'roles' => ['mobile_developer', 'other'],
             'skills' => [
@@ -73,7 +73,7 @@ class SpecializationSeeder extends Seeder
         ],
         'qa_testing' => [
             'title' => 'QA & Testing',
-            'name' => 'ضمان الجودة واختبار البرمجيات',
+            'name' => 'ضمان الجودة واختبار البرمجيات (QA)',
             'description' => 'اختبار البرمجيات يدويًا وآليًا لاكتشاف الأخطاء قبل وصولها للمستخدم.',
             'roles' => ['qa_tester', 'other'],
             'skills' => [
@@ -83,7 +83,7 @@ class SpecializationSeeder extends Seeder
         ],
         'data_ai' => [
             'title' => 'Data & AI',
-            'name' => 'علم البيانات والذكاء الاصطناعي',
+            'name' => 'علم البيانات والذكاء الاصطناعي (Data & AI)',
             'description' => 'تحليل البيانات وبناء نماذج التعلم الآلي.',
             'roles' => ['data_specialist', 'other'],
             'skills' => [

@@ -4,6 +4,7 @@ namespace Tests\Feature;
 
 use App\Models\User;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Facades\Route;
 use Laravel\Socialite\Facades\Socialite;
 use Laravel\Socialite\Two\InvalidStateException;
 use Laravel\Socialite\Two\User as GoogleUser;
@@ -247,7 +248,44 @@ class GoogleAuthTest extends TestCase
         Socialite::shouldReceive('driver')->with('google')->andReturn($provider);
     }
 
-    private function googleUser(string $sub, string $email, array $raw = []): GoogleUser
+    public function test_google_profile_stores_avatar_and_marks_the_email_verified(): void
+    {
+        $this->mockGoogle(fn ($provider) => $provider->shouldReceive('user')
+            ->andReturn($this->googleUser('sub-avatar', 'pic@gmail.com', avatar: 'https://lh3.googleusercontent.com/a/photo')));
+
+        $this->withSession(['google_oauth' => ['intent' => 'register', 'role' => 'student']])
+            ->get('/auth/google/callback?code=abc&state=ok')
+            ->assertRedirectContains(self::FRONTEND.'/auth/google/callback?code=');
+
+        $user = User::where('google_id', 'sub-avatar')->firstOrFail();
+        $this->assertSame('https://lh3.googleusercontent.com/a/photo', $user->avatar);
+        $this->assertNotNull($user->email_verified_at);
+    }
+
+    public function test_linking_marks_the_email_verified_and_ignores_unsafe_avatar_urls(): void
+    {
+        $existing = User::create(['name' => 'P', 'email' => 'owner2@gmail.com', 'password' => 'SecurePass123', 'role' => 'student']);
+        $this->mockGoogle(fn ($provider) => $provider->shouldReceive('user')
+            ->andReturn($this->googleUser('sub-owner2', 'owner2@gmail.com', avatar: 'javascript:alert(1)')));
+        $this->withSession(['google_oauth' => ['intent' => 'login', 'role' => null]])
+            ->get('/auth/google/callback?code=abc&state=ok')
+            ->assertRedirectContains(self::FRONTEND.'/auth/google/callback?code=');
+
+        $fresh = $existing->fresh();
+        $this->assertSame('sub-owner2', $fresh->google_id);
+        $this->assertNotNull($fresh->email_verified_at);
+        $this->assertNull($fresh->avatar);
+    }
+
+    public function test_forwarded_https_from_the_railway_proxy_is_trusted(): void
+    {
+        Route::get('/__scheme-check', fn () => url('/auth/google/callback'));
+
+        $this->get('/__scheme-check', ['X-Forwarded-Proto' => 'https', 'X-Forwarded-Host' => 'api.example.test'])
+            ->assertSeeText('https://api.example.test/auth/google/callback', false);
+    }
+
+    private function googleUser(string $sub, string $email, array $raw = [], ?string $avatar = null): GoogleUser
     {
         $raw = array_merge(['sub' => $sub, 'email' => $email, 'email_verified' => true], $raw);
 
@@ -255,6 +293,7 @@ class GoogleAuthTest extends TestCase
             'id' => $sub,
             'name' => 'Google Person',
             'email' => $email,
+            'avatar' => $avatar,
         ]);
     }
 

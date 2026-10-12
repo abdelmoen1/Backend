@@ -15,6 +15,7 @@ class ProjectProposalVersion extends Model
         'proposal',
         'staffing',
         'proposal_hash',
+        'confirmation_hash',
         'approved_by_user_id',
         'approved_at',
     ];

@@ -7,7 +7,7 @@ use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\HasMany;
 
 /**
- * جلسة تقييم مكتوب. questions تحوي معايير التصحيح والإجابة المرجعية ولذلك مخفية من JSON؛ ما يُعرض
+ * محاولة تقييم مكتوب لمهارة واحدة (skill_id) بمستوى طلبه الطالب (requested_level، طلب صعوبة لا إثبات). questions تحوي معايير التصحيح والإجابة المرجعية ولذلك مخفية من JSON؛ ما يُعرض
  * للطالب يُبنى حقلًا بحقل في AssessmentSessionService.
  */
 class AssessmentSession extends Model
@@ -21,6 +21,8 @@ class AssessmentSession extends Model
 
     protected $fillable = [
         'student_profile_id',
+        'skill_id',
+        'requested_level',
         'professional_specialization',
         'status',
         'open_slot',
@@ -43,6 +45,7 @@ class AssessmentSession extends Model
     protected function casts(): array
     {
         return [
+            'skill_id' => 'integer',
             'skill_ids' => 'array',
             'questions' => 'array',
             'settings' => 'array',
@@ -60,6 +63,12 @@ class AssessmentSession extends Model
     public function studentProfile(): BelongsTo
     {
         return $this->belongsTo(StudentProfile::class);
+    }
+
+    /** المهارة الوحيدة للمحاولة؛ NULL في جلسات الإصدار السابق متعددة المهارات (انظر skill_ids). */
+    public function skill(): BelongsTo
+    {
+        return $this->belongsTo(Skill::class);
     }
 
     public function answers(): HasMany

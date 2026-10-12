@@ -11,6 +11,9 @@ use Illuminate\Database\Eloquent\Relations\BelongsTo;
  * أو من اختبار الاختيار من متعدد القديم (platform_test). وهي وحدها ما يجعل المهارة "مُتحقق منها"
  * في المطابقة (انظر SkillVerification للمهارات العملية). السجل إضافي فقط: نتيجة ناجحة لا تُستبدل.
  *
+ * level: المستوى الذي تخصه النتيجة (SkillLevels). النجاح بمستوى يثبت ذلك المستوى فقط؛ المستوى المُثبت للمهارة
+ * هو أعلى مستوى ناجح يُحتسب، فلا يخفضه رسوب لاحق بأي مستوى. النتائج السابقة لإضافة المستويات تُعد "مبتدئ".
+ *
  * incomplete: تعذر تصحيح إحدى إجابات المهارة (خلل في الذكاء الاصطناعي وليس أداء الطالب)؛ لا نجاح ولا مهلة إعادة.
  */
 class SkillAssessment extends Model
@@ -34,6 +37,7 @@ class SkillAssessment extends Model
         'skill_test_attempt_id',
         'assessment_session_id',
         'status',
+        'level',
         'score',
         'source',
         'recorded_by_user_id',

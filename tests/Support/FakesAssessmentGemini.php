@@ -65,33 +65,36 @@ trait FakesAssessmentGemini
         ));
     }
 
+    /** أنواع أسئلة صالحة بالترتيب: 7 عملية ثم 3 كتابية */
+    protected const PROGRAMMING_TYPES = ['coding', 'debugging', 'sql', 'implementation', 'code_analysis', 'coding', 'implementation', 'explanation', 'reasoning', 'technical_analysis'];
+
+    protected const NON_PROGRAMMING_TYPES = ['scenario', 'design_task', 'case_study', 'scenario', 'design_task', 'case_study', 'scenario', 'explanation', 'reasoning', 'technical_analysis'];
+
     /**
-     * تقييم مولد صالح: لكل مهارة سؤالان (شرح ثم كود) بمعيارين (6 + 4 نقاط) وقيم سرية يسهل البحث عنها.
-     *
-     * @param  array<int, int>  $skillIds
+     * محاولة مولدة صالحة لمهارة واحدة: 10 أسئلة (7 عملية + 3 كتابية) بالمستوى المطلوب، لكل منها معياران
+     * (6 + 4 نقاط) وقيم سرية يسهل البحث عنها. $variant يغيّر نصوص الأسئلة لمحاكاة مجموعة جديدة.
      */
-    protected function generatedAssessment(array $skillIds, int $perSkill = 2): array
+    protected function generatedAssessment(int $skillId, string $level = 'intermediate', bool $programming = true, string $variant = 'A'): array
     {
         $questions = [];
-        foreach ($skillIds as $skillId) {
-            foreach (range(1, $perSkill) as $index) {
-                $questions[] = [
-                    'skill_id' => $skillId,
-                    'format' => $index % 2 === 0 ? 'code' : 'text',
-                    'difficulty' => 'intermediate',
-                    'prompt' => "اشرح بكلماتك أو اكتب كودًا للمهارة {$skillId} في السؤال رقم {$index}.",
-                    'code_context' => '',
-                    'language' => $index % 2 === 0 ? 'php' : '',
-                    'criteria' => [
-                        ['description' => 'يشرح الفكرة الأساسية بدقة.', 'points' => 6],
-                        ['description' => 'يذكر مثالًا صحيحًا.', 'points' => 4],
-                    ],
-                    'reference_answer' => "SECRET-REFERENCE-{$skillId}-{$index}",
-                    'key_concepts' => ['SECRET-CONCEPT'],
-                    'common_mistakes' => ['SECRET-MISTAKE'],
-                    'minimum_evidence' => 'SECRET-MINIMUM-EVIDENCE',
-                ];
-            }
+        foreach ($programming ? self::PROGRAMMING_TYPES : self::NON_PROGRAMMING_TYPES as $index => $type) {
+            $number = $index + 1;
+            $questions[] = [
+                'skill_id' => $skillId,
+                'type' => $type,
+                'difficulty' => $level,
+                'prompt' => "سؤال {$type} رقم {$number} للمهارة {$skillId} بمستوى {$level} (مجموعة {$variant}).",
+                'code_context' => in_array($type, ['debugging', 'code_analysis'], true) ? "<?php\n\$items = [1, 2];\necho \$items[2];" : '',
+                'language' => $programming && in_array($type, ['coding', 'debugging', 'implementation', 'code_analysis'], true) ? 'php' : ($type === 'sql' ? 'sql' : ''),
+                'criteria' => [
+                    ['description' => 'يشرح الفكرة الأساسية بدقة.', 'points' => 6],
+                    ['description' => 'يذكر مثالًا صحيحًا.', 'points' => 4],
+                ],
+                'reference_answer' => "SECRET-REFERENCE-{$skillId}-{$number}",
+                'key_concepts' => ['SECRET-CONCEPT'],
+                'common_mistakes' => ['SECRET-MISTAKE'],
+                'minimum_evidence' => 'SECRET-MINIMUM-EVIDENCE',
+            ];
         }
 
         return ['title' => 'تقييم تجريبي', 'questions' => $questions];

@@ -3,6 +3,7 @@
 namespace App\Services\Projects;
 
 use App\Models\Skill;
+use App\Services\Assessments\SkillLevels;
 use App\Services\Assessments\SkillVerification;
 
 /**
@@ -52,6 +53,15 @@ final class ProjectStaffing
 
             $mandatory = self::skillNames($item['mandatory_skills'] ?? []);
             $desirable = array_values(array_diff(self::skillNames($item['desirable_skills'] ?? []), $mandatory));
+            // توصية الذكاء الاصطناعي بالمستوى لكل مهارة إلزامية؛ لا تُعتمد إلا بتأكيد المؤسسة عند الاعتماد
+            $recommended = [];
+            foreach (is_array($item['mandatory_skill_levels'] ?? null) ? $item['mandatory_skill_levels'] : [] as $entry) {
+                $name = is_array($entry) ? self::text($entry['skill'] ?? null, 80) : '';
+                $match = array_values(array_filter($mandatory, fn (string $skill): bool => mb_strtolower($skill) === mb_strtolower($name)));
+                if ($match !== [] && SkillLevels::valid($entry['level'] ?? null) && ! isset($recommended[mb_strtolower($match[0])])) {
+                    $recommended[mb_strtolower($match[0])] = ['skill' => $match[0], 'level' => $entry['level']];
+                }
+            }
             $category = is_string($item['category'] ?? null) && isset(self::ROLE_CATEGORIES[$item['category']])
                 ? $item['category']
                 : 'other';
@@ -64,6 +74,7 @@ final class ProjectStaffing
                 'headcount' => max(1, min(5, (int) ($item['headcount'] ?? 1))),
                 'mandatory_skills' => $mandatory,
                 'desirable_skills' => $desirable,
+                'mandatory_skill_levels' => array_values($recommended),
             ];
 
             if (count($roles) === self::MAX_ROLES) {
@@ -88,8 +99,12 @@ final class ProjectStaffing
         $untested = [];
 
         foreach ($roles as &$role) {
+            $recommended = [];
+            foreach ($role['mandatory_skill_levels'] as $entry) {
+                $recommended[mb_strtolower($entry['skill'])] = $entry['level'];
+            }
             foreach (['mandatory_skills', 'desirable_skills'] as $key) {
-                $role[$key] = array_map(function (string $name) use ($catalog, $practical, $key, &$unmapped, &$untested): array {
+                $role[$key] = array_map(function (string $name) use ($catalog, $practical, $key, $recommended, &$unmapped, &$untested): array {
                     $skill = $catalog[mb_strtolower($name)] ?? null;
                     // assessable: يكفي التقييم المكتوب لإثباتها في المطابقة
                     $hasTest = $skill !== null && ! in_array($skill['id'], $practical, true);
@@ -99,9 +114,16 @@ final class ProjectStaffing
                         $untested[] = $skill['name'];
                     }
 
-                    return ['id' => $skill['id'] ?? null, 'name' => $skill['name'] ?? $name, 'assessable' => $hasTest];
+                    $item = ['id' => $skill['id'] ?? null, 'name' => $skill['name'] ?? $name, 'assessable' => $hasTest];
+                    if ($key === 'mandatory_skills') {
+                        // توصية فقط (قد تكون null)؛ الحد الأدنى الفعلي تؤكده المؤسسة عند الاعتماد
+                        $item['recommended_level'] = $recommended[mb_strtolower($name)] ?? null;
+                    }
+
+                    return $item;
                 }, $role[$key]);
             }
+            unset($role['mandatory_skill_levels']);
             $role['category_label'] = self::ROLE_CATEGORIES[$role['category']];
             // الدور قابل للمطابقة فقط إذا كانت له مهارة إلزامية واحدة على الأقل موجودة في المنصة
             $role['matchable'] = array_filter($role['mandatory_skills'], fn (array $skill): bool => $skill['id'] !== null) !== [];

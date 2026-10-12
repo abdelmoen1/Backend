@@ -2,6 +2,8 @@
 
 namespace Tests\Support;
 
+use App\Services\Projects\ProjectStaffing;
+
 class ProjectProposalFixture
 {
     /** المهارات التي تشير إليها متطلبات الفريق في withStaffing؛ تُنشأ في الاختبار قبل الاعتماد. */
@@ -20,6 +22,8 @@ class ProjectProposalFixture
                 'headcount' => 1,
                 'mandatory_skills' => ['Flutter', 'Dart'],
                 'desirable_skills' => ['Git'],
+                // توصيات الذكاء الاصطناعي؛ لا تُعتمد إلا بتأكيد المؤسسة
+                'mandatory_skill_levels' => [['skill' => 'Flutter', 'level' => 'intermediate'], ['skill' => 'Dart', 'level' => 'beginner']],
             ],
             [
                 'category' => 'backend_developer',
@@ -29,10 +33,31 @@ class ProjectProposalFixture
                 'headcount' => 1,
                 'mandatory_skills' => ['Laravel', 'REST API'],
                 'desirable_skills' => ['MySQL'],
+                'mandatory_skill_levels' => [['skill' => 'Laravel', 'level' => 'intermediate']],
             ],
         ];
 
         return $proposal;
+    }
+
+    /**
+     * طلب اعتماد بمستويات مؤكدة صراحةً لكل مهارة إلزامية مرتبطة بالمنصة (كما ترسلها الواجهة بعد مراجعة المؤسسة).
+     *
+     * @param  array<string, string>  $levels  اسم المهارة => المستوى؛ غير المذكور يأخذ $default
+     */
+    public static function approval(?array $proposal = null, array $levels = [], string $default = 'beginner'): array
+    {
+        $staffing = ProjectStaffing::fromProposal($proposal ?? self::withStaffing());
+        $confirmed = [];
+        foreach ($staffing['roles'] as $index => $role) {
+            foreach ($role['mandatory_skills'] as $skill) {
+                if ($skill['id'] !== null) {
+                    $confirmed[] = ['role' => $index, 'skill_id' => $skill['id'], 'level' => $levels[$skill['name']] ?? $default];
+                }
+            }
+        }
+
+        return ['confirm_requirements' => true, 'role_skill_levels' => $confirmed];
     }
 
     public static function valid(): array

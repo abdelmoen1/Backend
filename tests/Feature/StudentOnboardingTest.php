@@ -131,7 +131,7 @@ class StudentOnboardingTest extends TestCase
 
         $this->patchJson('/api/student/onboarding', ['professional_specialization' => 'mobile_development'])
             ->assertOk()
-            ->assertJsonPath('data.professional_specialization_label', 'تطوير تطبيقات الجوال');
+            ->assertJsonPath('data.professional_specialization_label', 'تطوير تطبيقات الجوال (Mobile App)');
 
         $this->assertDatabaseHas('student_profiles', ['user_id' => $student->id, 'onboarding_completed' => false]);
     }

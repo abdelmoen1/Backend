@@ -50,5 +50,4 @@ return [
         'retry_delay_ms' => (int) env('GEMINI_RETRY_DELAY_MS', 1000),
         'thinking_budget' => env('GEMINI_THINKING_BUDGET'),
     ],
-
 ];

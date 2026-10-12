@@ -12,6 +12,9 @@ return Application::configure(basePath: dirname(__DIR__))
         health: '/up',
     )
     ->withMiddleware(function (Middleware $middleware) {
+        // Railway ينهي HTTPS عند الوكيل؛ نثق بترويسات X-Forwarded-* حتى تُولَّد الروابط بـ https
+        $middleware->trustProxies(at: '*');
+
         // إجابات التقييم تُحفظ حرفيًا: قص المسافات يغيّر إزاحة الكود
         $middleware->trimStrings(except: ['answer']);
     })

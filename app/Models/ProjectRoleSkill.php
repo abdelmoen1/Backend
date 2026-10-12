@@ -17,6 +17,7 @@ class ProjectRoleSkill extends Model
         'project_role_id',
         'skill_id',
         'importance',
+        'min_level',
     ];
 
     public function role(): BelongsTo

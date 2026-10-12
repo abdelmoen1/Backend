@@ -5,10 +5,12 @@ namespace App\Http\Controllers\Api;
 use App\Http\Controllers\Controller;
 use App\Services\Assessments\AssessmentException;
 use App\Services\Assessments\AssessmentSessionService;
+use App\Services\Assessments\SkillLevels;
 use App\Services\Projects\OpportunityMatcher;
 use App\Services\Projects\SpecializationRoles;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use Illuminate\Validation\Rule;
 
 /**
  * تقييم المهارات بأسئلة مفتوحة يولدها Gemini. الطالب يرسل نص إجابته فقط؛ لا يوجد مسار يقبل درجة أو
@@ -30,6 +32,7 @@ class StudentAssessmentController extends Controller
             'success' => true,
             'data' => $this->sessions->overview($student) + [
                 'verified_skills' => $matcher->verifiedSkills($student)->values()->all(),
+                'verified_levels' => $matcher->verifiedLevels($student)->values()->all(),
             ],
         ]);
     }
@@ -50,22 +53,22 @@ class StudentAssessmentController extends Controller
             return $response;
         }
 
-        $max = (int) config('assessments.max_skills_per_session', 3);
+        // محاولة واحدة = مهارة واحدة بمستوى يطلبه الطالب (طلب صعوبة، لا إثبات للمستوى)
         $validated = $request->validate([
-            'skill_ids' => ['required', 'array', 'min:1', "max:{$max}"],
-            'skill_ids.*' => ['required', 'integer', 'distinct'],
+            'skill_id' => ['required', 'integer'],
+            'level' => ['required', 'string', Rule::in(SkillLevels::ALL)],
         ], [
-            'skill_ids.required' => 'اختر مهارة واحدة على الأقل للتقييم.',
-            'skill_ids.min' => 'اختر مهارة واحدة على الأقل للتقييم.',
-            'skill_ids.max' => "يمكن تقييم {$max} مهارات كحد أقصى في الجلسة الواحدة.",
-            'skill_ids.*.integer' => 'إحدى المهارات المختارة غير صالحة.',
-            'skill_ids.*.distinct' => 'اخترت المهارة نفسها أكثر من مرة.',
+            'skill_id.required' => 'اختر المهارة التي تريد تقييمها.',
+            'skill_id.integer' => 'المهارة المختارة غير صالحة.',
+            'level.required' => 'اختر مستوى التقييم: مبتدئ أو متوسط أو متقدم.',
+            'level.in' => 'اختر مستوى التقييم: مبتدئ أو متوسط أو متقدم.',
         ]);
 
         try {
             [$session, $created] = $this->sessions->start(
                 $request->user()->studentProfile,
-                array_map('intval', $validated['skill_ids'])
+                (int) $validated['skill_id'],
+                $validated['level']
             );
         } catch (AssessmentException $exception) {
             return $this->error($exception);

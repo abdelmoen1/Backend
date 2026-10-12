@@ -13,7 +13,7 @@ use JsonException;
  */
 class AssessmentGrader
 {
-    public const PROMPT_VERSION = 'free-response-grading-v1';
+    public const PROMPT_VERSION = 'free-response-grading-v2';
 
     public const STATUS_GRADED = 'graded';
 
@@ -33,6 +33,9 @@ class AssessmentGrader
                     'id' => $question['id'],
                     'skill' => $skillName,
                     'format' => $question['format'],
+                    // غير موجودين في أسئلة الإصدار السابق
+                    'type' => $question['type'] ?? null,
+                    'difficulty' => $question['difficulty'] ?? null,
                     'language' => $question['language'],
                     'prompt' => $question['prompt'],
                     'code_context' => $question['code_context'],
@@ -151,6 +154,7 @@ class AssessmentGrader
             'لكل معيار في rubric.criteria أعد id نفسه و awarded عددًا صحيحًا من 0 حتى points الخاصة به، دون إضافة معايير أو حذفها.',
             'امنح الدرجة الكاملة للحلول البديلة الصحيحة حتى لو اختلفت عن reference_answer، وميّز الإجابة الجزئية من الكاملة. لا تمنح نقاطًا لشرح واثق لكنه خاطئ تقنيًا. الأخطاء الحرجة في common_mistakes تقلل الدرجة.',
             'لا تخصم بسبب لغة الإجابة (العربية أو الإنجليزية) أو أسلوب الكتابة أو الأخطاء الإملائية ما لم تغيّر المعنى التقني. في أسئلة الكود قيّم صحة المنطق والصياغة الأساسية، ولا تشترط تطابق الأسماء أو التنسيق مع النموذج.',
+            'question.difficulty مستوى التقييم: قيّم بما يناسبه، فلا تشترط في سؤال للمبتدئين عمقًا لم يطلبه، ولا تمنح الدرجة الكاملة في سؤال متقدم لإجابة سطحية.',
             'status = insufficient_answer إذا كانت الإجابة فارغة فعليًا أو خارج الموضوع أو لا تحقق rubric.minimum_evidence إطلاقًا؛ وإلا graded.',
             'evidence: اقتباسات قصيرة حرفية من إجابة الطالب تبرر التقييم. missing_concepts: المفاهيم الأساسية الناقصة أو الخاطئة. feedback: جملتان أو ثلاث بالعربية تشرح التقييم دون نسخ reference_answer.',
             'question_id هو question.id نفسه. لا تقرر النجاح أو الرسوب؛ أعد النقاط فقط. أعد JSON مطابقًا للمخطط فقط.',

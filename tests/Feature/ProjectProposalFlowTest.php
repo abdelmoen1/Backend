@@ -169,7 +169,7 @@ class ProjectProposalFlowTest extends TestCase
         $this->postJson("/api/organization/project-requests/{$projectRequestId}/approve")
             ->assertUnprocessable()
             ->assertJsonValidationErrors('confirm_requirements');
-        $this->postJson("/api/organization/project-requests/{$projectRequestId}/approve", ['confirm_requirements' => true])
+        $this->postJson("/api/organization/project-requests/{$projectRequestId}/approve", ProjectProposalFixture::approval())
             ->assertOk()
             ->assertJsonPath('data.status', ProjectRequestStatus::CONVERTED_TO_OPPORTUNITY)
             ->assertJsonPath('data.publication.status', 'published')
@@ -225,13 +225,13 @@ class ProjectProposalFlowTest extends TestCase
             ->assertJsonPath('data.proposal.project_overview.project_name', $proposal['project_overview']['project_name'])
             ->assertJsonPath('data.revision_note', 'يرجى توضيح تكلفة تشغيل النظام.');
 
-        $approved = $this->postJson("/api/organization/project-requests/{$projectRequest->id}/approve", ['confirm_requirements' => true])
+        $approved = $this->postJson("/api/organization/project-requests/{$projectRequest->id}/approve", ProjectProposalFixture::approval())
             ->assertOk()
             ->assertJsonPath('data.status', ProjectRequestStatus::CONVERTED_TO_OPPORTUNITY);
         $approvedAt = $approved->json('data.approved_at');
 
         // إعادة الاعتماد (نقرة مكررة أو إعادة محاولة) لا تنشئ نسخة أو فرصة جديدة
-        $this->postJson("/api/organization/project-requests/{$projectRequest->id}/approve", ['confirm_requirements' => true])
+        $this->postJson("/api/organization/project-requests/{$projectRequest->id}/approve", ProjectProposalFixture::approval())
             ->assertOk()
             ->assertJsonPath('data.publication.version', 1);
 

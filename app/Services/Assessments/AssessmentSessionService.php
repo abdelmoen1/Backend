@@ -9,18 +9,21 @@ use App\Models\SkillAssessment;
 use App\Models\StudentProfile;
 use App\Services\Projects\SpecializationRoles;
 use Illuminate\Database\UniqueConstraintViolationException;
+use Illuminate\Support\Carbon;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 
 /**
- * جلسات التقييم المكتوب:
- * - البدء: يتطلب مسارًا مهنيًا؛ Gemini يولد الأسئلة ومعاييرها، والجلسة تُنشأ فقط بعد التحقق منها، بنسخة
- *   مجمدة لا تتغير عند التحديث أو الاستئناف. جلسة مفتوحة واحدة لكل طالب.
- * - الإجابة: سؤال واحد في كل مرة وبالترتيب؛ تُحفظ الإجابة حرفيًا قبل أي عملية أخرى، وتكرار الإرسال لا ينشئ نسخة.
- * - التصحيح: لكل إجابة على حدة، تدريجيًا وقابلًا للاستئناف (كل إجابة تُحفظ درجتها فور تصحيحها)؛ فشل
- *   Gemini لا يغير شيئًا ولا يتطلب إعادة الاختبار.
- * - النتيجة: لكل مهارة مستقلة في skill_assessments، يحسبها Laravel من الدرجات المتحقق منها وقواعد settings.
+ * محاولات التقييم المكتوب، كل محاولة لمهارة واحدة بمستوى يختاره الطالب:
+ * - البدء: يتطلب مسارًا مهنيًا ومستوى؛ Gemini يولد 10 أسئلة جديدة (7 عملية + 3 كتابية) متجنبًا أسئلة الطالب
+ *   السابقة للمهارة والمستوى نفسيهما، والجلسة تُنشأ فقط بعد التحقق منها بنسخة مجمدة. محاولة مفتوحة واحدة لكل
+ *   طالب: التحديث أو طلب البدء مجددًا يعيدها بالأسئلة نفسها.
+ * - إعادة المحاولة: مسموحة دائمًا، حتى بعد النجاح (مثل الانتقال لمستوى أعلى)، مع مهلة للمهارة والمستوى نفسيهما
+ *   وحد يومي لعدد المحاولات. النتائج السابقة تبقى، ورسوب لاحق لا يلغي نجاحًا سابقًا.
+ * - الإجابة: سؤال واحد في كل مرة وبالترتيب؛ تُحفظ حرفيًا، وتكرار الإرسال لا ينشئ نسخة.
+ * - التصحيح: لكل إجابة على حدة، تدريجيًا وقابلًا للاستئناف؛ فشل Gemini لا يغير شيئًا.
+ * - النتيجة: في skill_assessments بمستوى المحاولة، يحسبها Laravel من الدرجات المتحقق منها وقواعد settings.
  */
 class AssessmentSessionService
 {
@@ -31,25 +34,25 @@ class AssessmentSessionService
         private readonly AssessmentGrader $grader,
     ) {}
 
-    /** نظرة عامة لصفحة التقييم: المسار، حالة كل مهارة، الجلسة المفتوحة، وسجل الجلسات. */
+    /** نظرة عامة لصفحة التقييم: المسار، حالة كل مهارة ومستوياتها، المحاولة المفتوحة، والسجل. */
     public function overview(StudentProfile $student): array
     {
         $this->expireStale($student);
 
         $selected = $student->studentSkills()->pluck('skill_id')->map(fn ($id): int => (int) $id)->all();
         $practical = SkillVerification::practicalSkillIds();
-        $results = $student->skillAssessments()->orderByDesc('assessed_at')->orderByDesc('id')->get()->groupBy('skill_id');
+        $nonProgramming = SkillVerification::nonProgrammingSkillIds();
+        $results = $this->resultsBySkill($student);
         $open = $this->openSession($student);
 
-        $skills = Skill::query()->orderBy('name')->get(['id', 'name'])->map(function (Skill $skill) use ($selected, $practical, $results): array {
-            $status = $this->skillStatus($skill->id, $results->get($skill->id, collect()), $practical);
-
+        $skills = Skill::query()->orderBy('name')->get(['id', 'name'])->map(function (Skill $skill) use ($selected, $practical, $nonProgramming, $results): array {
             return [
                 'id' => $skill->id,
                 'name' => $skill->name,
                 'selected' => in_array($skill->id, $selected, true),
                 'practical' => in_array($skill->id, $practical, true),
-            ] + $status;
+                'programming' => ! in_array($skill->id, $nonProgramming, true),
+            ] + $this->skillStatus($results->get($skill->id, collect()), $practical);
         })->all();
 
         return [
@@ -59,27 +62,31 @@ class AssessmentSessionService
             'active_session' => $open ? $this->summary($open) : null,
             'history' => $student->assessmentSessions()
                 ->where('status', AssessmentSession::STATUS_COMPLETED)
-                ->with('results.skill:id,name')
                 ->latest('completed_at')
+                ->latest('id')
                 ->limit(10)
                 ->get()
                 ->map(fn (AssessmentSession $session): array => $this->summary($session))
                 ->all(),
+            'attempts' => $this->attemptAllowance($student),
             'settings' => [
-                'questions_per_skill' => (int) config('assessments.questions_per_skill'),
-                'max_skills_per_session' => (int) config('assessments.max_skills_per_session'),
-                'minutes_per_question' => (int) config('assessments.minutes_per_question'),
+                'levels' => SkillLevels::catalog(),
+                'questions' => self::questionMix() + ['total' => array_sum(self::questionMix())],
+                'time_limit_minutes' => array_combine(SkillLevels::ALL, array_map(self::timeLimitMinutes(...), SkillLevels::ALL)),
                 'skill_pass_percentage' => (int) config('assessments.skill_pass_percentage'),
+                'practical_pass_percentage' => (int) config('assessments.practical_pass_percentage'),
                 'retake_after_hours' => (int) config('assessments.retake_after_hours'),
+                'max_attempts_per_day' => (int) config('assessments.max_attempts_per_day'),
             ],
         ];
     }
 
     /**
-     * @param  array<int, int>  $skillIds
+     * يبدأ محاولة جديدة لمهارة واحدة بالمستوى المطلوب، أو يعيد المحاولة المفتوحة كما هي.
+     *
      * @return array{0: AssessmentSession, 1: bool} الجلسة، وهل أُنشئت الآن
      */
-    public function start(StudentProfile $student, array $skillIds): array
+    public function start(StudentProfile $student, int $skillId, string $level): array
     {
         $this->expireStale($student);
         $open = $this->openSession($student);
@@ -91,24 +98,60 @@ class AssessmentSessionService
         if ($specialization['status'] !== SpecializationRoles::COMPATIBLE) {
             throw new AssessmentException('اختر مسارك المهني أولًا ليُبنى التقييم عليه.', 'specialization_required', 422);
         }
+        if (! SkillLevels::valid($level)) {
+            throw new AssessmentException('اختر مستوى التقييم: مبتدئ أو متوسط أو متقدم.', 'level_required', 422);
+        }
 
-        $skills = $this->skillsForSession($student, $skillIds);
+        $skill = Skill::query()->find($skillId);
+        if (! $skill) {
+            throw new AssessmentException('المهارة المختارة غير موجودة في قائمة المنصة.', 'unknown_skill', 422);
+        }
+
         $practical = SkillVerification::practicalSkillIds();
+        $status = $this->skillStatus($this->resultsBySkill($student, $skill->id)->get($skill->id, collect()), $practical);
+        $next = $status['levels'][$level]['next_attempt_at'];
+        if ($next !== null) {
+            throw new AssessmentException(
+                'لا يمكن إعادة تقييم '.$skill->name.' بمستوى '.SkillLevels::label($level).' قبل انتهاء مدة الانتظار. يمكنك اختيار مستوى آخر أو مهارة أخرى.',
+                'retake_not_available',
+                409,
+                ['skill' => $skill->name, 'level' => $level, 'next_attempt_at' => $next]
+            );
+        }
 
-        // التوليد قد يستغرق ثواني؛ القفل يمنع نقرتين متتاليتين من توليد جلستين
+        $allowance = $this->attemptAllowance($student);
+        if ($allowance['remaining'] === 0) {
+            throw new AssessmentException(
+                'بلغت الحد الأقصى لعدد محاولات التقييم خلال 24 ساعة. يمكنك بدء محاولة جديدة لاحقًا.',
+                'attempt_limit_reached',
+                429,
+                ['next_attempt_at' => $allowance['next_attempt_at']]
+            );
+        }
+
+        // التوليد قد يستغرق ثواني؛ القفل يمنع نقرتين متتاليتين من توليد محاولتين
         $lock = Cache::lock("assessment-start:{$student->id}", 180);
         if (! $lock->get()) {
             throw new AssessmentException('يجري إعداد تقييمك الآن. انتظر قليلًا ثم حدّث الصفحة.', 'session_starting', 409, retryable: true);
         }
 
         try {
+            $mix = self::questionMix();
+            $minutes = self::timeLimitMinutes($level);
+            $programming = ! in_array($skill->id, SkillVerification::nonProgrammingSkillIds(), true);
+            $previous = $this->previousPrompts($student, $skill->id, $level);
             $assessment = $this->generator->generate(
                 ['key' => $specialization['key'], 'label' => $specialization['label']],
-                $skills,
-                $practical
+                $skill,
+                $level,
+                $programming,
+                in_array($skill->id, $practical, true),
+                $mix,
+                $minutes,
+                $previous,
             );
 
-            return DB::transaction(function () use ($student, $skills, $assessment, $specialization): array {
+            return DB::transaction(function () use ($student, $skill, $level, $assessment, $specialization, $mix, $minutes, $programming, $previous): array {
                 StudentProfile::query()->whereKey($student->id)->lockForUpdate()->first();
                 $open = $this->openSession($student);
                 if ($open) {
@@ -116,35 +159,41 @@ class AssessmentSessionService
                 }
 
                 $now = now();
-                $count = count($assessment['questions']);
                 $session = $student->assessmentSessions()->create([
+                    'skill_id' => $skill->id,
+                    'requested_level' => $level,
                     'professional_specialization' => $specialization['key'],
                     'status' => AssessmentSession::STATUS_IN_PROGRESS,
                     'open_slot' => 1,
                     'title' => $assessment['title'],
-                    'skill_ids' => $skills->pluck('id')->all(),
+                    'skill_ids' => [$skill->id],
                     'questions' => $assessment['questions'],
-                    'question_count' => $count,
+                    'question_count' => count($assessment['questions']),
                     'settings' => [
-                        'questions_per_skill' => (int) config('assessments.questions_per_skill'),
+                        'version' => 2,
+                        'level' => $level,
+                        'questions' => $mix,
+                        'time_limit_minutes' => $minutes,
                         'skill_pass_percentage' => (int) config('assessments.skill_pass_percentage'),
+                        'practical_pass_percentage' => (int) config('assessments.practical_pass_percentage'),
                         'question_floor_percentage' => (int) config('assessments.question_floor_percentage'),
+                        'max_weak_answers' => (int) config('assessments.max_weak_answers'),
                         'retake_after_hours' => (int) config('assessments.retake_after_hours'),
                     ],
                     'generation' => [
                         'provider' => 'gemini',
                         'model' => (string) config('services.gemini.model'),
                         'prompt_version' => AssessmentQuestionGenerator::PROMPT_VERSION,
-                        'difficulty' => (string) config('assessments.difficulty'),
+                        'difficulty' => $level,
+                        'programming' => $programming,
+                        'avoided_previous_questions' => count($previous),
                     ],
                     'started_at' => $now,
-                    'expires_at' => $now->copy()->addMinutes($count * (int) config('assessments.minutes_per_question', 10)),
+                    'expires_at' => $now->copy()->addMinutes($minutes),
                 ]);
 
                 // اختيار مهارة للتقييم إعلان ذاتي عنها؛ التحقق يبقى في skill_assessments وحدها
-                foreach ($skills as $skill) {
-                    $student->studentSkills()->firstOrCreate(['skill_id' => $skill->id]);
-                }
+                $student->studentSkills()->firstOrCreate(['skill_id' => $skill->id]);
 
                 return [$session, true];
             });
@@ -243,7 +292,7 @@ class AssessmentSessionService
     }
 
     /**
-     * يصحح الإجابات المعلقة ضمن مهلة زمنية ثم يسجل النتائج إذا اكتمل كل شيء. آمن للتكرار: الإجابات
+     * يصحح الإجابات المعلقة ضمن مهلة زمنية ثم يسجل النتيجة إذا اكتمل كل شيء. آمن للتكرار: الإجابات
      * المصححة لا تُعاد، والنتائج لا تُسجل مرتين.
      *
      * @return array{0: AssessmentSession, 1: ?AssessmentException} الجلسة، وآخر خطأ تصحيح في هذا الطلب
@@ -329,6 +378,11 @@ class AssessmentSessionService
                 'name' => $skills->get($id)?->name,
                 'practical' => in_array($id, $practical, true),
             ])->all(),
+            // التركيبة الفعلية للأسئلة المحفوظة (لا ما ادعاه النموذج)
+            'question_mix' => [
+                'practical' => collect($session->questions)->where('category', AssessmentQuestionGenerator::CATEGORY_PRACTICAL)->count(),
+                'written' => collect($session->questions)->where('category', AssessmentQuestionGenerator::CATEGORY_WRITTEN)->count(),
+            ],
             'answered_count' => $answers->count(),
             'started_at' => $session->started_at->toIso8601String(),
             'expires_at' => $session->expires_at->toIso8601String(),
@@ -338,6 +392,8 @@ class AssessmentSessionService
                 'id' => $current['id'],
                 'position' => $current['position'],
                 'skill' => ['id' => $current['skill_id'], 'name' => $skills->get($current['skill_id'])?->name],
+                'type' => $current['type'] ?? null,
+                'category' => $current['category'] ?? null,
                 'format' => $current['format'],
                 'language' => $current['language'],
                 'difficulty' => $current['difficulty'],
@@ -365,18 +421,25 @@ class AssessmentSessionService
 
     private function summary(AssessmentSession $session): array
     {
+        $names = Skill::query()->whereIn('id', $session->skill_ids)->orderBy('name')->pluck('name', 'id');
+
         return [
             'id' => $session->id,
             'title' => $session->title,
             'status' => $session->status,
             'question_count' => $session->question_count,
-            'skill_names' => Skill::query()->whereIn('id', $session->skill_ids)->orderBy('name')->pluck('name')->all(),
+            'skill' => $session->skill_id ? ['id' => $session->skill_id, 'name' => $names->get($session->skill_id)] : null,
+            'requested_level' => $session->requested_level,
+            'requested_level_label' => SkillLevels::label($session->requested_level),
+            'skill_names' => $names->values()->all(),
             'completed_at' => $session->completed_at?->toIso8601String(),
             'outcomes' => $session->status === AssessmentSession::STATUS_COMPLETED
                 ? $session->results()->with('skill:id,name')->get()->map(fn (SkillAssessment $result): array => [
                     'skill' => $result->skill?->name,
                     'status' => $result->status,
                     'score' => $result->score,
+                    'level' => SkillVerification::levelOf($result),
+                    'level_label' => SkillLevels::label(SkillVerification::levelOf($result)),
                 ])->all()
                 : [],
         ];
@@ -387,24 +450,34 @@ class AssessmentSessionService
      */
     private function presentResults(AssessmentSession $session, Collection $answers, Collection $skills, array $practical): array
     {
-        $selected = $session->studentProfile->studentSkills()->pluck('skill_id')->map(fn ($id): int => (int) $id)->all();
+        $student = $session->studentProfile;
+        $selected = $student->studentSkills()->pluck('skill_id')->map(fn ($id): int => (int) $id)->all();
+        $allResults = $this->resultsBySkill($student);
         $results = $session->results()->get()->keyBy('skill_id');
         $answersById = $answers->keyBy('question_id');
 
-        return collect($session->skill_ids)->map(function (int $skillId) use ($session, $results, $answersById, $skills, $practical, $selected): array {
+        return collect($session->skill_ids)->map(function (int $skillId) use ($session, $results, $allResults, $answersById, $skills, $practical, $selected): array {
             $result = $results->get($skillId);
             $isPractical = in_array($skillId, $practical, true);
+            $verified = SkillVerification::highestLevel($allResults->get($skillId, collect()), $practical);
+            $level = $result ? SkillVerification::levelOf($result) : $session->requested_level;
+            $graded = in_array($result?->status, [SkillAssessment::STATUS_PASSED, SkillAssessment::STATUS_FAILED], true);
 
             return [
                 'skill' => ['id' => $skillId, 'name' => $skills->get($skillId)?->name],
                 'status' => $result?->status,
                 'score' => $result?->score,
                 'reason' => $result?->notes,
+                'level' => $level,
+                'level_label' => SkillLevels::label($level),
+                // أعلى مستوى مُثبت الآن لهذه المهارة (لا يخفضه رسوب هذه المحاولة)
+                'verified_level' => $verified,
+                'verified_level_label' => SkillLevels::label($verified),
                 'counts_for_matching' => $result !== null
                     && in_array($skillId, $selected, true)
                     && SkillVerification::counts($result, $practical),
                 'needs_human_verification' => $isPractical,
-                'next_attempt_at' => $result?->status === SkillAssessment::STATUS_FAILED
+                'next_attempt_at' => $graded
                     ? $result->assessed_at->copy()->addHours((int) $session->settings['retake_after_hours'])->toIso8601String()
                     : null,
                 'questions' => collect($session->questions)
@@ -414,6 +487,8 @@ class AssessmentSessionService
 
                         return [
                             'position' => $question['position'],
+                            'category' => $question['category'] ?? null,
+                            'type' => $question['type'] ?? null,
                             'prompt' => $question['prompt'],
                             'answered' => $answer !== null,
                             'grade_status' => $answer?->grade_status,
@@ -430,10 +505,8 @@ class AssessmentSessionService
     }
 
     /**
-     * يحسب نتيجة كل مهارة من الدرجات المحفوظة ويسجلها مرة واحدة:
-     * - إجابة غير قابلة للتصحيح → incomplete (لا نجاح ولا مهلة إعادة).
-     * - سؤال دون إجابة (انتهى الوقت) أو عدد أسئلة أقل من المطلوب → failed.
-     * - وإلا ناجح إذا بلغ مجموع النقاط skill_pass_percentage ولم تقل أي إجابة عن question_floor_percentage.
+     * يحسب نتيجة المهارة من الدرجات المحفوظة ويسجلها مرة واحدة بمستوى المحاولة. نتيجة جديدة لا تعدّل
+     * أو تحذف أي نتيجة سابقة، فالمستوى المُثبت سابقًا يبقى كما هو.
      */
     private function complete(AssessmentSession $session): void
     {
@@ -454,6 +527,8 @@ class AssessmentSessionService
                     [
                         'student_profile_id' => $session->student_profile_id,
                         'status' => $status,
+                        // جلسات الإصدار السابق بلا مستوى مطلوب تُعد "مبتدئ" كبقية النتائج السابقة
+                        'level' => $session->requested_level ?? SkillLevels::BEGINNER,
                         'score' => $score,
                         'source' => SkillAssessment::SOURCE_AI_WRITTEN,
                         'notes' => $reason,
@@ -471,101 +546,196 @@ class AssessmentSessionService
         });
     }
 
-    /** @return array{0: string, 1: ?int, 2: string} */
+    /**
+     * نتيجة مهارة من أسئلتها فقط (لا تؤثر مهارة في أخرى)، بقواعد settings المحفوظة في الجلسة:
+     * - إجابة غير قابلة للتصحيح → incomplete (لا نجاح ولا مهلة إعادة).
+     * - عدد أسئلة أقل من المطلوب → failed.
+     * - ناجح إذا بلغ المجموع skill_pass_percentage، وبلغت الأسئلة العملية practical_pass_percentage، ولم تزد
+     *   الإجابات الضعيفة (دون question_floor_percentage أو دون إجابة) عن max_weak_answers.
+     * جلسات الإصدار السابق ليس فيها practical_pass_percentage ولا max_weak_answers (= 0)، فتبقى قواعدها كما كانت.
+     *
+     * @return array{0: string, 1: ?int, 2: string}
+     */
     public function skillOutcome(Collection $questions, Collection $answers, array $settings): array
     {
         $awarded = 0;
         $max = 0;
-        $belowFloor = false;
+        $practicalAwarded = 0;
+        $practicalMax = 0;
+        $weak = 0;
+        $unanswered = false;
 
         foreach ($questions as $question) {
             $answer = $answers->get($question['id']);
             if ($answer?->grade_status === AssessmentSessionAnswer::GRADE_UNGRADABLE) {
                 return [SkillAssessment::STATUS_INCOMPLETE, null, 'grading_unavailable'];
             }
+            $unanswered = $unanswered || $answer === null;
             $points = $answer?->grade_status === AssessmentSessionAnswer::GRADE_GRADED ? (int) $answer->awarded_points : 0;
             $awarded += $points;
             $max += (int) $question['max_points'];
+            if (($question['category'] ?? null) === AssessmentQuestionGenerator::CATEGORY_PRACTICAL) {
+                $practicalAwarded += $points;
+                $practicalMax += (int) $question['max_points'];
+            }
             if ($points * 100 < (int) $settings['question_floor_percentage'] * (int) $question['max_points']) {
-                $belowFloor = true;
+                $weak++;
             }
         }
 
         $score = $max > 0 ? intdiv($awarded * 100, $max) : 0;
-        $unanswered = $questions->contains(fn (array $question): bool => $answers->get($question['id']) === null);
-        if ($questions->count() < (int) $settings['questions_per_skill'] || $unanswered) {
+        $required = isset($settings['questions']) ? array_sum($settings['questions']) : (int) ($settings['questions_per_skill'] ?? 1);
+        if ($questions->count() < $required) {
             return [SkillAssessment::STATUS_FAILED, $score, 'unanswered_questions'];
         }
 
-        // مقارنة بالأعداد الصحيحة حتى لا يرفع التقريب نتيجة راسبة
-        $passed = $awarded * 100 >= (int) $settings['skill_pass_percentage'] * $max && ! $belowFloor;
+        // مقارنات بالأعداد الصحيحة حتى لا يرفع التقريب نتيجة راسبة
+        $totalOk = $awarded * 100 >= (int) $settings['skill_pass_percentage'] * $max;
+        $practicalOk = ! isset($settings['practical_pass_percentage']) || $practicalMax === 0
+            || $practicalAwarded * 100 >= (int) $settings['practical_pass_percentage'] * $practicalMax;
+        $weakOk = $weak <= (int) ($settings['max_weak_answers'] ?? 0);
 
+        if ($totalOk && $practicalOk && $weakOk) {
+            return [SkillAssessment::STATUS_PASSED, $score, 'passed'];
+        }
+
+        return [SkillAssessment::STATUS_FAILED, $score, match (true) {
+            $unanswered && ! $weakOk => 'unanswered_questions',
+            ! $totalOk => 'below_threshold',
+            ! $practicalOk => 'practical_below_threshold',
+            default => 'weak_answer',
+        }];
+    }
+
+    /** @return array{practical: int, written: int} */
+    public static function questionMix(): array
+    {
         return [
-            $passed ? SkillAssessment::STATUS_PASSED : SkillAssessment::STATUS_FAILED,
-            $score,
-            $passed ? 'passed' : ($belowFloor ? 'weak_answer' : 'below_threshold'),
+            'practical' => max(1, (int) config('assessments.questions.practical', 7)),
+            'written' => max(0, (int) config('assessments.questions.written', 3)),
         ];
     }
 
-    /**
-     * @param  array<int, int>  $skillIds
-     * @return Collection<int, Skill>
-     */
-    private function skillsForSession(StudentProfile $student, array $skillIds): Collection
+    public static function timeLimitMinutes(string $level): int
     {
-        $skills = Skill::query()->whereIn('id', $skillIds)->get()->keyBy('id');
-        $ordered = collect($skillIds)->map(fn (int $id): ?Skill => $skills->get($id))->filter()->values();
-        if ($ordered->count() !== count($skillIds)) {
-            throw new AssessmentException('إحدى المهارات المختارة غير موجودة في قائمة المنصة.', 'unknown_skill', 422);
-        }
+        return max(5, (int) config("assessments.time_limit_minutes.{$level}", 45));
+    }
 
-        $results = $student->skillAssessments()->whereIn('skill_id', $skillIds)->orderByDesc('assessed_at')->orderByDesc('id')->get()->groupBy('skill_id');
-        $practical = SkillVerification::practicalSkillIds();
-        $passed = [];
-        $waiting = [];
-        foreach ($ordered as $skill) {
-            $status = $this->skillStatus($skill->id, $results->get($skill->id, collect()), $practical);
-            if ($status['status'] === SkillAssessment::STATUS_PASSED) {
-                $passed[] = $skill->name;
-            } elseif ($status['next_attempt_at'] !== null) {
-                $waiting[] = ['skill' => $skill->name, 'next_attempt_at' => $status['next_attempt_at']];
-            }
-        }
-
-        if ($passed !== []) {
-            throw new AssessmentException('اجتزت تقييم هذه المهارات بالفعل: '.implode('، ', $passed).'. أزلها من الاختيار.', 'skill_already_passed', 422, ['skills' => $passed]);
-        }
-        if ($waiting !== []) {
-            throw new AssessmentException('لا يمكن إعادة تقييم بعض المهارات قبل انتهاء مدة الانتظار.', 'retake_not_available', 409, ['skills' => $waiting]);
-        }
-
-        return $ordered;
+    /** @return Collection<int, Collection<int, SkillAssessment>> نتائج الطالب لكل مهارة، الأحدث أولًا */
+    private function resultsBySkill(StudentProfile $student, ?int $skillId = null): Collection
+    {
+        return $student->skillAssessments()
+            ->when($skillId !== null, fn ($query) => $query->where('skill_id', $skillId))
+            ->orderByDesc('assessed_at')
+            ->orderByDesc('id')
+            ->get()
+            ->groupBy('skill_id');
     }
 
     /**
-     * حالة المهارة للطالب: ناجح إذا وُجدت نتيجة ناجحة (لا تُلغى بنتيجة لاحقة)، وإلا آخر نتيجة.
+     * حالة المهارة للطالب: أعلى مستوى مُثبت (لا يخفضه رسوب لاحق)، وحالة كل مستوى ومهلة إعادته.
      *
-     * @return array{status: string, verified: bool, score: ?int, source: ?string, assessed_at: ?string, next_attempt_at: ?string, can_assess: bool}
+     * @param  Collection<int, SkillAssessment>  $results  الأحدث أولًا
      */
-    private function skillStatus(int $skillId, Collection $results, array $practical): array
+    private function skillStatus(Collection $results, array $practical): array
     {
+        $verified = SkillVerification::highestLevel($results, $practical);
         $passed = $results->firstWhere('status', SkillAssessment::STATUS_PASSED);
-        $latest = $passed ?? $results->first();
-        $next = null;
-        if (! $passed && $latest?->status === SkillAssessment::STATUS_FAILED) {
-            $candidate = $latest->assessed_at->copy()->addHours((int) config('assessments.retake_after_hours', 24));
-            $next = $candidate->isFuture() ? $candidate->toIso8601String() : null;
+        $latest = $results->first();
+
+        $levels = [];
+        foreach (SkillLevels::ALL as $level) {
+            $atLevel = $results->filter(fn (SkillAssessment $result): bool => SkillVerification::levelOf($result) === $level)->values();
+            $levelPassed = $atLevel->firstWhere('status', SkillAssessment::STATUS_PASSED);
+            $levelLatest = $atLevel->first();
+            $next = $this->nextAttemptAt($atLevel);
+            $levels[$level] = [
+                'level' => $level,
+                'label' => SkillLevels::LABELS[$level],
+                'status' => $levelPassed?->status ?? $levelLatest?->status ?? self::SKILL_NOT_ASSESSED,
+                'score' => ($levelPassed ?? $levelLatest)?->score,
+                'verified' => $atLevel->contains(fn (SkillAssessment $result): bool => SkillVerification::counts($result, $practical)),
+                'attempts' => $atLevel->count(),
+                'next_attempt_at' => $next,
+                'can_assess' => $next === null,
+            ];
         }
 
         return [
-            'status' => $latest?->status ?? self::SKILL_NOT_ASSESSED,
-            'verified' => $results->contains(fn (SkillAssessment $result): bool => SkillVerification::counts($result, $practical)),
-            'score' => $latest?->score,
-            'source' => $latest?->source,
-            'assessed_at' => $latest?->assessed_at?->toIso8601String(),
-            'next_attempt_at' => $next,
-            'can_assess' => ! $passed && $next === null,
+            'status' => $passed?->status ?? $latest?->status ?? self::SKILL_NOT_ASSESSED,
+            'verified' => $verified !== null,
+            'verified_level' => $verified,
+            'verified_level_label' => SkillLevels::label($verified),
+            'score' => ($passed ?? $latest)?->score,
+            'source' => ($passed ?? $latest)?->source,
+            'assessed_at' => ($passed ?? $latest)?->assessed_at?->toIso8601String(),
+            'levels' => $levels,
+            'can_assess' => collect($levels)->contains('can_assess', true),
         ];
+    }
+
+    /** مهلة إعادة المهارة بالمستوى نفسه بعد آخر محاولة مكتملة التصحيح (ناجحة أو راسبة). */
+    private function nextAttemptAt(Collection $resultsAtLevel): ?string
+    {
+        $last = $resultsAtLevel->first(fn (SkillAssessment $result): bool => $result->source === SkillAssessment::SOURCE_AI_WRITTEN
+            && in_array($result->status, [SkillAssessment::STATUS_PASSED, SkillAssessment::STATUS_FAILED], true));
+        if (! $last) {
+            return null;
+        }
+
+        $next = $last->assessed_at->copy()->addHours((int) config('assessments.retake_after_hours', 24));
+
+        return $next->isFuture() ? $next->toIso8601String() : null;
+    }
+
+    /**
+     * عدد المحاولات الجديدة المتبقية خلال آخر 24 ساعة (كل محاولة تكلف توليدًا وعشرة تصحيحات).
+     *
+     * @return array{max: int, remaining: ?int, next_attempt_at: ?string}
+     */
+    private function attemptAllowance(StudentProfile $student): array
+    {
+        $max = (int) config('assessments.max_attempts_per_day', 6);
+        if ($max <= 0) {
+            return ['max' => 0, 'remaining' => null, 'next_attempt_at' => null];
+        }
+
+        $recent = $student->assessmentSessions()
+            ->where('created_at', '>', now()->subDay())
+            ->orderBy('created_at')
+            ->get(['created_at'])
+            ->map(fn (AssessmentSession $session): Carbon => $session->created_at);
+        $remaining = max(0, $max - $recent->count());
+
+        return [
+            'max' => $max,
+            'remaining' => $remaining,
+            // تتحرر أول خانة عندما تخرج أقدم محاولة من نافذة الـ24 ساعة
+            'next_attempt_at' => $remaining === 0 ? $recent->get($recent->count() - $max)->copy()->addDay()->toIso8601String() : null,
+        ];
+    }
+
+    /** @return array<int, string> نصوص أسئلة سابقة للطالب في المهارة والمستوى نفسيهما، الأحدث أولًا */
+    private function previousPrompts(StudentProfile $student, int $skillId, string $level): array
+    {
+        $limit = max(0, (int) config('assessments.avoid_previous_questions', 30));
+        if ($limit === 0) {
+            return [];
+        }
+
+        return $student->assessmentSessions()
+            ->where('skill_id', $skillId)
+            ->where('requested_level', $level)
+            ->latest('id')
+            ->limit(10)
+            ->get(['id', 'questions'])
+            ->flatMap(fn (AssessmentSession $session): array => array_column($session->questions ?? [], 'prompt'))
+            ->filter(fn ($prompt): bool => is_string($prompt) && $prompt !== '')
+            ->unique()
+            ->take($limit)
+            ->map(fn (string $prompt): string => mb_substr($prompt, 0, 300))
+            ->values()
+            ->all();
     }
 
     private function openSession(StudentProfile $student): ?AssessmentSession

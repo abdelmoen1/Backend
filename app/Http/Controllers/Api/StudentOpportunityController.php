@@ -12,9 +12,11 @@ use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 
 /**
- * فرص المشاريع للطلاب. الفلترة تتم هنا في الخادم (التخصص + المهارات المتحقق منها بتقييم ناجح):
- * المشروع غير المنشور أو غير المطابق يُعامل كغير موجود (404) حتى عند طلبه مباشرة بالمعرّف.
- * لا تُعاد بيانات المؤسسة الخاصة مثل التكلفة والميزانية والدفعات ولا محادثة الاكتشاف.
+ * فرص المشاريع للطلاب. كل فرصة منشورة تظهر لكل طالب أكمل ملفه، مع حالة أهلية يحسبها الخادم لكل دور
+ * (OpportunityMatcher) وأسبابها؛ عدم الأهلية لا يخفي الفرصة. الفرصة غير المنشورة (معلقة أو مسحوبة أو غير
+ * موجودة) تُعامل كغير موجودة (404) حتى عند طلبها مباشرة بالمعرّف.
+ * لا تُعاد بيانات المؤسسة الخاصة مثل التكلفة والميزانية والدفعات ولا محادثة الاكتشاف ولا مبررات الأدوار الداخلية.
+ * لا يوجد مسار تقديم بعد؛ أي مسار يُضاف لاحقًا يجب أن يعيد التحقق من الأهلية في الخادم.
  */
 class StudentOpportunityController extends Controller
 {
@@ -31,10 +33,10 @@ class StudentOpportunityController extends Controller
             'data' => [
                 'opportunities' => array_map(
                     fn (array $entry): array => $this->summary($entry),
-                    $matcher->visibleFor($student)
+                    $matcher->forStudent($student)
                 ),
                 'verified_skills' => $matcher->verifiedSkills($student)->values()->all(),
-                // سبب غياب الفرص إن كان التخصص غير مرتبط بأي دور (لا يُستعاض عنه بتخفيف شرط المهارات)
+                'verified_levels' => $matcher->verifiedLevels($student)->values()->all(),
                 'specialization' => $matcher->specialization($student),
             ],
         ]);
@@ -46,11 +48,11 @@ class StudentOpportunityController extends Controller
             return $response;
         }
 
-        $entry = $matcher->findVisibleFor($request->user()->studentProfile, $opportunity);
+        $entry = $matcher->findForStudent($request->user()->studentProfile, $opportunity);
         if ($entry === null) {
             return response()->json([
                 'success' => false,
-                'message' => 'هذه الفرصة غير متاحة لك حاليًا.',
+                'message' => 'هذه الفرصة غير متاحة حاليًا.',
             ], 404);
         }
 
@@ -82,7 +84,6 @@ class StudentOpportunityController extends Controller
     {
         /** @var ProjectOpportunity $opportunity */
         $opportunity = $entry['opportunity'];
-        $matchedRoleIds = array_map(fn (array $match): int => $match['role']->id, $entry['matches']);
 
         return [
             'id' => $opportunity->id,
@@ -95,23 +96,40 @@ class StudentOpportunityController extends Controller
                 'name' => $opportunity->organization?->organization_name,
                 'industry' => $opportunity->organization?->industry,
             ],
-            'roles' => $opportunity->activeVersion->roles->map(fn (ProjectRole $role): array => [
-                'id' => $role->id,
-                'category' => $role->category,
-                'category_label' => ProjectStaffing::ROLE_CATEGORIES[$role->category] ?? $role->category,
-                'title' => $role->title,
-                'responsibilities' => $role->responsibilities,
-                'headcount' => $role->headcount,
-                'mandatory_skills' => $this->skillNames($role, ProjectRoleSkill::MANDATORY),
-                'desirable_skills' => $this->skillNames($role, ProjectRoleSkill::DESIRABLE),
-                'matched' => in_array($role->id, $matchedRoleIds, true),
-                'specialization_compatible' => $entry['roles'][$role->id]['specialization_compatible'] ?? false,
-                'missing_skills' => $entry['roles'][$role->id]['missing_skills'] ?? [],
-            ])->all(),
-            // سبب ظهور المشروع: الأدوار المطابقة والمهارات المُتحقق منها فعلًا
+            // أهلية الطالب يحسبها الخادم؛ لا تعني تقديمًا أو اختيارًا للفريق
+            'eligibility' => $entry['eligibility'],
+            'roles' => $opportunity->activeVersion->roles->map(function (ProjectRole $role) use ($entry): array {
+                $evaluation = $entry['roles'][$role->id];
+
+                return [
+                    'id' => $role->id,
+                    'category' => $role->category,
+                    'category_label' => ProjectStaffing::ROLE_CATEGORIES[$role->category] ?? $role->category,
+                    'title' => $role->title,
+                    'responsibilities' => $role->responsibilities,
+                    'headcount' => $role->headcount,
+                    'mandatory_skills' => $this->skillNames($role, ProjectRoleSkill::MANDATORY),
+                    'desirable_skills' => $this->skillNames($role, ProjectRoleSkill::DESIRABLE),
+                    // المهارات الإلزامية مع المستوى الأدنى المطلوب ومستوى الطالب المثبت
+                    'requirements' => $evaluation['skills'],
+                    'eligibility' => [
+                        'status' => $evaluation['status'],
+                        'message' => $evaluation['message'],
+                        'reasons' => $evaluation['reasons'],
+                        'action' => $evaluation['action'],
+                    ],
+                    'matched' => $evaluation['status'] === OpportunityMatcher::ELIGIBLE,
+                    'specialization_compatible' => ! in_array($evaluation['status'], [OpportunityMatcher::SPECIALIZATION_MISMATCH, OpportunityMatcher::PROFILE_INCOMPLETE], true),
+                    'missing_skills' => array_values(array_map(
+                        fn (array $skill): string => $skill['name'],
+                        array_filter($evaluation['skills'], fn (array $skill): bool => ! $skill['met'])
+                    )),
+                ];
+            })->all(),
             'match' => [
                 'roles' => array_map(fn (array $match): string => $match['role']->title, $entry['matches']),
                 'verified_skills' => array_values(array_unique(array_merge(
+                    [],
                     ...array_map(fn (array $match): array => $match['verified_skills'], $entry['matches'])
                 ))),
             ],

@@ -145,7 +145,7 @@ class GoogleAuthController extends Controller
             return DB::transaction(function () use ($googleUser, $raw, $googleId, $email, $intent, $role): array {
                 $user = User::where('google_id', $googleId)->lockForUpdate()->first();
                 if ($user) {
-                    return ['user' => $user];
+                    return ['user' => $this->syncGoogleProfile($user, $googleUser, $email)];
                 }
 
                 $existing = User::where('email', $email)->lockForUpdate()->first();
@@ -158,7 +158,7 @@ class GoogleAuthController extends Controller
                     // الربط لا يغيّر الدور ولا كلمة المرور الحالية
                     $existing->forceFill(['google_id' => $googleId])->save();
 
-                    return ['user' => $existing];
+                    return ['user' => $this->syncGoogleProfile($existing, $googleUser, $email)];
                 }
 
                 if ($intent !== 'register' || $role === null) {
@@ -174,7 +174,7 @@ class GoogleAuthController extends Controller
                 ]);
                 $user->ensureRoleProfile();
 
-                return ['user' => $user];
+                return ['user' => $this->syncGoogleProfile($user, $googleUser, $email)];
             });
         } catch (UniqueConstraintViolationException) {
             // طلبان متزامنان لنفس الحساب: نعيد الحساب الذي أُنشئ أولًا
@@ -182,6 +182,28 @@ class GoogleAuthController extends Controller
 
             return $user ? ['user' => $user] : ['error' => 'account_conflict'];
         }
+    }
+
+    /**
+     * يحفظ صورة Google (روابط https فقط) ويعلّم البريد متحققًا منه عندما يطابق البريد الذي تحقق منه Google
+     * (قد يختلف لحساب مربوط غيّر بريده في Google؛ عندها لا نعلّم بريد الحساب كمتحقق).
+     */
+    private function syncGoogleProfile(User $user, SocialiteUser $googleUser, string $verifiedEmail): User
+    {
+        $avatar = trim((string) $googleUser->getAvatar());
+        $changes = [];
+        if (str_starts_with($avatar, 'https://') && filter_var($avatar, FILTER_VALIDATE_URL) && strlen($avatar) <= 1024) {
+            $changes['avatar'] = $avatar;
+        }
+        if ($user->email_verified_at === null && Str::lower($user->email) === $verifiedEmail) {
+            $changes['email_verified_at'] = now();
+        }
+
+        if ($changes !== []) {
+            $user->forceFill($changes)->save();
+        }
+
+        return $user;
     }
 
     /**

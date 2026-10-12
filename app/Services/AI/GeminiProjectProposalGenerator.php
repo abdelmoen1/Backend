@@ -6,6 +6,7 @@ use App\Contracts\AIProvider;
 use App\Contracts\ProjectProposalGenerator;
 use App\Models\IntakeResponse;
 use App\Models\ProjectRequest;
+use App\Services\Assessments\SkillLevels;
 use App\Services\Projects\ProjectStaffing;
 use Illuminate\Http\Client\ConnectionException;
 use Illuminate\Support\Facades\Log;
@@ -199,6 +200,7 @@ class GeminiProjectProposalGenerator implements ProjectProposalGenerator
                             'إذا وُجد revision_request فطبّق التعديل المطلوب على النطاق والمراحل والمدة والتكلفة والتشغيل بما يتسق مع المتطلبات المحدثة، دون أرقام غير مبررة.',
                             'staffing_requirements هو مصدر الحقيقة لأدوار الفريق: لكل دور اختر category من role_categories، واذكر المسؤوليات وrationale يربطه بميزات محددة في functional_scope. لا تضف دورًا لا يحتاجه النطاق فعلًا (مثل مصمم أو مدير مشروع كعضو مستقل) ولا تخلط بين مسؤولية ومهمة عضو فريق كامل.',
                             'المهارات الإلزامية والمرغوبة يجب أن تكون من skill_catalog حرفيًا. لا تفرض إطار عمل أو تقنية بعينها (مثل Flutter أو Laravel أو React Native) ما لم تؤكدها المؤسسة أو يفرضها النطاق المؤكد؛ عندها استخدم المهارة الأعم (مثل REST API أو JavaScript) أو اجعل التقنية مرغوبة لا إلزامية.',
+                            'mandatory_skill_levels: لكل مهارة إلزامية في الدور اقترح level (beginner أو intermediate أو advanced) يناسب تعقيد المسؤوليات فعلًا، دون مبالغة؛ فريق الطلاب يتعلم أثناء التنفيذ. هذه توصية تراجعها المؤسسة وتؤكدها قبل النشر.',
                             'key_requirements: المتطلبات الحرجة للمشروع مع basis: confirmed إذا ذكرتها المؤسسة، recommendation إذا كانت توصية منك بانتظار تأكيدها، assumption إذا كانت افتراضًا، unknown إذا لم تُحسم بعد. لا تقدم توصية أو افتراضًا كحقيقة مؤكدة.',
                             'لا تختلق حقائق عن المؤسسة أو مواعيد أو أرقام أداء أو توفير مالي أو بيانات متاحة. يمكنك حساب نسبة من أرقام ذكرتها المؤسسة، لكن اعرضها كهدف محتمل مع افتراضاته وليس كنتيجة مضمونة. technical_recommendation توصية مبدئية لم تُعتمد بعد، فصغها كذلك.',
                             'اذكر في operational_cost والنطاق من سيشغّل النظام بعد التسليم (مثل موظف يحدّث البيانات) دون أن تجعله عضوًا في فريق التطوير. اكتب عناصر القوائم دون ترقيم يدوي في بدايتها.',
@@ -281,8 +283,20 @@ class GeminiProjectProposalGenerator implements ProjectProposalGenerator
                     'headcount' => ['type' => 'INTEGER'],
                     'mandatory_skills' => ['type' => 'ARRAY', 'items' => $skillSchema],
                     'desirable_skills' => ['type' => 'ARRAY', 'items' => $skillSchema],
+                    // توصية فقط: تؤكد المؤسسة المستوى الأدنى لكل مهارة إلزامية قبل النشر
+                    'mandatory_skill_levels' => [
+                        'type' => 'ARRAY',
+                        'items' => [
+                            'type' => 'OBJECT',
+                            'properties' => [
+                                'skill' => $skillSchema,
+                                'level' => ['type' => 'STRING', 'enum' => SkillLevels::ALL],
+                            ],
+                            'required' => ['skill', 'level'],
+                        ],
+                    ],
                 ],
-                'required' => ['category', 'title', 'responsibilities', 'rationale', 'headcount', 'mandatory_skills', 'desirable_skills'],
+                'required' => ['category', 'title', 'responsibilities', 'rationale', 'headcount', 'mandatory_skills', 'desirable_skills', 'mandatory_skill_levels'],
             ],
         ];
         $schema['properties']['key_requirements'] = [
