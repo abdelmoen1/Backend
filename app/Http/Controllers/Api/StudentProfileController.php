@@ -3,9 +3,9 @@
 namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
+use App\Http\Requests\CompleteStudentOnboardingRequest;
 use App\Http\Requests\UpdateStudentProfileRequest;
 use App\Http\Resources\StudentProfileResource;
-use App\Services\Projects\SpecializationRoles;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
@@ -125,15 +125,12 @@ class StudentProfileController extends Controller
             ),
         ]);
     }
-    public function completeOnboarding(Request $request): JsonResponse
+    /**
+     * يحفظ بيانات الإكمال كلها في معاملة واحدة: إن فشل أي جزء لا يُحفظ شيء ويمكن إعادة الإرسال بأمان.
+     * التخصص إلزامي (عليه تُبنى التقييمات ومطابقة أدوار المشاريع) والمهارات من مهاراته فقط.
+     */
+    public function completeOnboarding(CompleteStudentOnboardingRequest $request): JsonResponse
     {
-        if ($request->user()->role !== 'student') {
-            return response()->json([
-                'success' => false,
-                'message' => 'Only students can complete onboarding.',
-            ], 403);
-        }
-
         $studentProfile = $request->user()->studentProfile;
 
         if (!$studentProfile) {
@@ -143,18 +140,34 @@ class StudentProfileController extends Controller
             ], 404);
         }
 
-        // المسار المهني إلزامي: عليه تُبنى التقييمات ومطابقة أدوار المشاريع
-        if (SpecializationRoles::for($studentProfile->professional_specialization)['status'] !== SpecializationRoles::COMPATIBLE) {
-            return response()->json([
-                'success' => false,
-                'message' => 'اختر مسارك المهني لإكمال ملفك.',
-                'errors' => ['professional_specialization' => ['اختر مسارك المهني لإكمال ملفك.']],
-            ], 422);
-        }
+        $validated = $request->validated();
+        $skillIds = collect($validated['skill_ids'])->map(fn ($id): int => (int) $id)->unique();
 
-        $studentProfile->update([
-            'onboarding_completed' => true,
-        ]);
+        DB::transaction(function () use ($request, $studentProfile, $validated, $skillIds): void {
+            $request->user()->update(['name' => $validated['name']]);
+
+            // قبل الإكمال تمثل المهارات المحفوظة محاولات إكمال سابقة فتُضبط على الاختيار الحالي؛
+            // بعده لا تُحذف مهارات أضافها الطالب من ملفه
+            if (! $studentProfile->onboarding_completed) {
+                $studentProfile->studentSkills()->whereNotIn('skill_id', $skillIds)->delete();
+            }
+
+            $existing = $studentProfile->studentSkills()->pluck('skill_id')->map(fn ($id): int => (int) $id);
+            foreach ($skillIds->diff($existing) as $skillId) {
+                $studentProfile->studentSkills()->create([
+                    'skill_id' => $skillId,
+                    'proficiency' => 'intermediate',
+                ]);
+            }
+
+            $studentProfile->update([
+                'university' => $validated['university'],
+                'graduation_year' => $validated['graduation_year'],
+                'phone' => $validated['phone'] ?? null,
+                'professional_specialization' => $validated['professional_specialization'],
+                'onboarding_completed' => true,
+            ]);
+        });
 
         return response()->json([
             'success' => true,

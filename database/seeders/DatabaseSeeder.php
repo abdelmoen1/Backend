@@ -10,6 +10,7 @@ class DatabaseSeeder extends Seeder
     {
         $this->call([
             SkillSeeder::class,
+            SpecializationSeeder::class,
         ]);
 
         if (app()->environment(['local', 'testing'])) {

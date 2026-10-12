@@ -9,6 +9,7 @@ use App\Models\Skill;
 use App\Models\SkillAssessment;
 use App\Models\StudentProfile;
 use App\Models\User;
+use Database\Seeders\SpecializationSeeder;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Testing\TestResponse;
@@ -35,6 +36,8 @@ class FreeResponseAssessmentTest extends TestCase
         foreach (['PHP', 'Laravel', 'MySQL', 'Figma', 'Flutter'] as $name) {
             $this->skills[$name] = Skill::create(['name' => $name])->id;
         }
+        // ربط المهارات المنشأة بتخصصاتها
+        $this->seed(SpecializationSeeder::class);
     }
 
     public function test_a_professional_specialization_is_required_before_generating_anything(): void
@@ -50,8 +53,8 @@ class FreeResponseAssessmentTest extends TestCase
             ->assertJsonPath('data.settings.questions_per_skill', 2);
         $catalog = collect($this->getJson('/api/student/specializations')->assertOk()->json('data'));
         $backend = $catalog->firstWhere('key', 'backend_development');
-        $this->assertSame(['PHP', 'Laravel', 'MySQL'], array_column($backend['suggested_skills'], 'name'));
-        $this->assertSame($this->skills['PHP'], $backend['suggested_skills'][0]['id']);
+        $this->assertSame(['PHP', 'Laravel', 'MySQL'], array_column($backend['skills'], 'name'));
+        $this->assertSame($this->skills['PHP'], $backend['skills'][0]['id']);
 
         $this->postJson('/api/student/assessment-sessions', ['skill_ids' => [$this->skills['PHP']]])
             ->assertUnprocessable()

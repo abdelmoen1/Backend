@@ -49,5 +49,5 @@ return [
 
     // مهارات عملية لا تثبتها إجابة مكتوبة: تُطرح عنها أسئلة سيناريو، لكن نجاحها الكتابي لا يُحتسب في
     // مطابقة المشاريع إلا بتحقق بشري (skills:record-assessment) مثل مراجعة أعمال سابقة
-    'practical_skills' => ['Figma', 'UI/UX Design'],
+    'practical_skills' => ['Figma', 'UI/UX Design', 'Adobe XD', 'Wireframing', 'Prototyping'],
 ];

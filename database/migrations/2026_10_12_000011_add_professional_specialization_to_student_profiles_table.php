@@ -7,7 +7,7 @@ use Illuminate\Support\Facades\Schema;
 return new class extends Migration
 {
     /**
-     * المسار المهني للطالب (مفتاح من config/matching.php) وهو ما تعتمد عليه مطابقة أدوار المشاريع.
+     * المسار المهني للطالب (مفتاح من جدول specializations) وهو ما تعتمد عليه مطابقة أدوار المشاريع.
      * يبقى academic_major كما هو: التخصص الجامعي بيانات أكاديمية منفصلة ولا يُحذف.
      */
     public function up(): void

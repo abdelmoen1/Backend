@@ -2,9 +2,12 @@
 
 namespace Tests\Feature;
 
+use App\Http\Requests\CompleteStudentOnboardingRequest;
 use App\Models\Skill;
 use App\Models\StudentProfile;
 use App\Models\User;
+use Database\Seeders\SkillSeeder;
+use Database\Seeders\SpecializationSeeder;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Facades\Storage;
@@ -14,54 +17,113 @@ class StudentOnboardingTest extends TestCase
 {
     use RefreshDatabase;
 
-    public function test_current_student_can_complete_onboarding_without_selecting_a_user_id(): void
+    private function onboardingStudent(string $email, array $profile = []): User
     {
         $student = User::create([
             'name' => 'Student One',
-            'email' => 'student@example.com',
+            'email' => $email,
             'password' => 'SecurePass123',
             'role' => 'student',
         ]);
-        $otherStudent = User::create([
-            'name' => 'Student Two',
-            'email' => 'other@example.com',
-            'password' => 'SecurePass123',
-            'role' => 'student',
-        ]);
-        StudentProfile::create(['user_id' => $student->id, 'professional_specialization' => 'backend_development']);
-        StudentProfile::create(['user_id' => $otherStudent->id]);
+        StudentProfile::create(['user_id' => $student->id] + $profile);
+
+        return $student;
+    }
+
+    /** @return array<string, int> */
+    private function seedCatalog(): array
+    {
+        $this->seed(SkillSeeder::class);
+        $this->seed(SpecializationSeeder::class);
+
+        return Skill::pluck('id', 'name')->map(fn ($id): int => (int) $id)->all();
+    }
+
+    private function payload(array $overrides = []): array
+    {
+        return array_merge([
+            'name' => 'Ahmad Student',
+            'phone' => '+970599123456',
+            'university' => 'الجامعة الإسلامية بغزة',
+            'graduation_year' => '2027',
+            'professional_specialization' => 'backend_development',
+            'skill_ids' => [],
+        ], $overrides);
+    }
+
+    public function test_the_specializations_and_their_skills_come_from_the_seeded_catalog(): void
+    {
+        $skills = $this->seedCatalog();
+        $student = $this->onboardingStudent('catalog@example.com');
+
+        $catalog = collect($this->actingAs($student, 'sanctum')
+            ->getJson('/api/student/specializations')
+            ->assertOk()
+            ->json('data'));
+
+        $this->assertSame(array_keys(SpecializationSeeder::SPECIALIZATIONS), $catalog->pluck('key')->all());
+        $mobile = $catalog->firstWhere('key', 'mobile_development');
+        $this->assertSame('Mobile App', $mobile['title']);
+        $this->assertSame(SpecializationSeeder::SPECIALIZATIONS['mobile_development']['skills'], array_column($mobile['skills'], 'name'));
+        $this->assertSame($skills['Flutter'], $mobile['skills'][0]['id']);
+        $this->assertNotContains('Laravel', array_column($mobile['skills'], 'name'));
+    }
+
+    public function test_current_student_completes_onboarding_in_one_request(): void
+    {
+        $skills = $this->seedCatalog();
+        $student = $this->onboardingStudent('student@example.com', ['academic_major' => 'علوم الحاسوب']);
+        $otherStudent = $this->onboardingStudent('other@example.com');
 
         $this->actingAs($student, 'sanctum')
-            ->postJson('/api/student/onboarding/complete', [
+            ->postJson('/api/student/onboarding/complete', $this->payload([
                 'student_id' => $otherStudent->id,
-            ])
+                'skill_ids' => [$skills['PHP'], $skills['Laravel']],
+            ]))
             ->assertOk()
-            ->assertJsonPath('data.onboarding_completed', true);
+            ->assertJsonPath('data.onboarding_completed', true)
+            ->assertJsonPath('data.name', 'Ahmad Student')
+            ->assertJsonPath('data.professional_specialization', 'backend_development')
+            ->assertJsonPath('data.professional_specialization_label', 'تطوير الخدمات الخلفية (Backend)')
+            ->assertJsonPath('data.skills.0.name', 'PHP')
+            ->assertJsonPath('data.skills.1.name', 'Laravel')
+            // التخصص الجامعي بيانات منفصلة لا يغيرها الإكمال
+            ->assertJsonPath('data.academic_major', 'علوم الحاسوب');
 
+        $this->assertDatabaseHas('users', ['id' => $student->id, 'name' => 'Ahmad Student']);
         $this->assertDatabaseHas('student_profiles', [
             'user_id' => $student->id,
+            'university' => 'الجامعة الإسلامية بغزة',
+            'graduation_year' => '2027',
+            'phone' => '+970599123456',
             'onboarding_completed' => true,
         ]);
+        $this->assertSame(2, $student->studentProfile->studentSkills()->count());
         $this->assertDatabaseHas('student_profiles', [
             'user_id' => $otherStudent->id,
             'onboarding_completed' => false,
         ]);
+        $this->assertSame(0, $otherStudent->studentProfile->studentSkills()->count());
     }
 
-    public function test_onboarding_requires_a_professional_specialization_from_the_catalog(): void
+    public function test_onboarding_requires_every_field_and_a_specialization_from_the_catalog(): void
     {
-        $student = User::create([
-            'name' => 'Student',
-            'email' => 'spec@example.com',
-            'password' => 'SecurePass123',
-            'role' => 'student',
-        ]);
-        StudentProfile::create(['user_id' => $student->id, 'academic_major' => 'علوم الحاسوب']);
+        $this->seedCatalog();
+        $student = $this->onboardingStudent('spec@example.com');
 
         $this->actingAs($student, 'sanctum')
             ->postJson('/api/student/onboarding/complete')
             ->assertUnprocessable()
-            ->assertJsonValidationErrors('professional_specialization');
+            ->assertJsonValidationErrors(['name', 'university', 'graduation_year', 'professional_specialization', 'skill_ids'])
+            ->assertJsonPath('errors.professional_specialization.0', 'اختر تخصصك.');
+
+        $this->postJson('/api/student/onboarding/complete', $this->payload([
+            'professional_specialization' => 'علوم الحاسوب',
+            'phone' => '0599',
+            'graduation_year' => '27',
+        ]))
+            ->assertUnprocessable()
+            ->assertJsonValidationErrors(['professional_specialization', 'phone', 'graduation_year']);
 
         $this->patchJson('/api/student/onboarding', ['professional_specialization' => 'not-a-track'])
             ->assertUnprocessable()
@@ -69,14 +131,74 @@ class StudentOnboardingTest extends TestCase
 
         $this->patchJson('/api/student/onboarding', ['professional_specialization' => 'mobile_development'])
             ->assertOk()
-            ->assertJsonPath('data.professional_specialization', 'mobile_development')
-            ->assertJsonPath('data.professional_specialization_label', 'تطوير تطبيقات الجوال')
-            // التخصص الجامعي بيانات منفصلة تبقى كما هي
-            ->assertJsonPath('data.academic_major', 'علوم الحاسوب');
+            ->assertJsonPath('data.professional_specialization_label', 'تطوير تطبيقات الجوال');
 
-        $this->postJson('/api/student/onboarding/complete')
-            ->assertOk()
-            ->assertJsonPath('data.onboarding_completed', true);
+        $this->assertDatabaseHas('student_profiles', ['user_id' => $student->id, 'onboarding_completed' => false]);
+    }
+
+    public function test_skills_must_belong_to_the_chosen_specialization_and_nothing_is_saved_otherwise(): void
+    {
+        $skills = $this->seedCatalog();
+        $student = $this->onboardingStudent('outside@example.com');
+
+        $this->actingAs($student, 'sanctum')
+            ->postJson('/api/student/onboarding/complete', $this->payload([
+                'professional_specialization' => 'mobile_development',
+                'skill_ids' => [$skills['Flutter'], $skills['Laravel']],
+            ]))
+            ->assertUnprocessable()
+            ->assertJsonPath('errors.skill_ids.0', 'اختر مهاراتك من مهارات تخصصك فقط.');
+
+        $this->postJson('/api/student/onboarding/complete', $this->payload([
+            'skill_ids' => [$skills['PHP'], 999999],
+        ]))->assertUnprocessable()->assertJsonValidationErrors('skill_ids');
+
+        $this->postJson('/api/student/onboarding/complete', $this->payload([
+            'skill_ids' => array_slice(array_values($skills), 0, CompleteStudentOnboardingRequest::MAX_SKILLS + 1),
+        ]))->assertUnprocessable()->assertJsonValidationErrors('skill_ids');
+
+        $this->assertDatabaseHas('users', ['id' => $student->id, 'name' => 'Student One']);
+        $this->assertDatabaseHas('student_profiles', [
+            'user_id' => $student->id,
+            'professional_specialization' => null,
+            'onboarding_completed' => false,
+        ]);
+        $this->assertSame(0, $student->studentProfile->studentSkills()->count());
+    }
+
+    public function test_retrying_onboarding_replaces_skills_from_an_unfinished_attempt_only(): void
+    {
+        $skills = $this->seedCatalog();
+        $student = $this->onboardingStudent('retry@example.com');
+        // محاولة سابقة لم تكتمل تركت مهارة من تخصص آخر
+        $student->studentProfile->studentSkills()->create(['skill_id' => $skills['Figma'], 'proficiency' => 'intermediate']);
+
+        $this->actingAs($student, 'sanctum')
+            ->postJson('/api/student/onboarding/complete', $this->payload(['skill_ids' => [$skills['PHP']]]))
+            ->assertOk();
+        $this->assertSame([$skills['PHP']], $student->studentProfile->studentSkills()->pluck('skill_id')->map(fn ($id): int => (int) $id)->all());
+
+        // بعد الإكمال لا تُحذف مهارات الملف عند إعادة الإرسال
+        $this->postJson('/api/student/onboarding/complete', $this->payload(['skill_ids' => [$skills['Laravel'], $skills['PHP']]]))
+            ->assertOk();
+        $this->assertEqualsCanonicalizing(
+            [$skills['PHP'], $skills['Laravel']],
+            $student->studentProfile->studentSkills()->pluck('skill_id')->map(fn ($id): int => (int) $id)->all(),
+        );
+    }
+
+    public function test_only_students_can_complete_onboarding(): void
+    {
+        $organization = User::create([
+            'name' => 'Org',
+            'email' => 'org@example.com',
+            'password' => 'SecurePass123',
+            'role' => 'organization',
+        ]);
+
+        $this->actingAs($organization, 'sanctum')
+            ->postJson('/api/student/onboarding/complete', $this->payload())
+            ->assertForbidden();
     }
 
     public function test_me_returns_the_backend_onboarding_state(): void
