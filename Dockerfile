@@ -10,4 +10,9 @@ WORKDIR /var/www
 COPY . .
 
 RUN composer install --no-dev --optimize-autoloader
+
+# سجلات Laravel تُكتب أيضًا إلى stderr لتظهر في سجلات منصة الاستضافة؛ ملف السجل داخل الحاوية
+# لا يمكن قراءته بدون صلاحية shell. أي قيمة LOG_STACK في إعدادات المنصة تتقدم على هذه القيمة.
+ENV LOG_STACK=single,stderr
+
 CMD php artisan serve --host=0.0.0.0 --port=${PORT:-8080}

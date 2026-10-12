@@ -4,7 +4,6 @@ namespace App\Services\AI;
 
 use App\Contracts\AIProvider;
 use Illuminate\Http\Client\ConnectionException;
-use Illuminate\Support\Facades\Log;
 use JsonException;
 
 class ProjectDiscoveryService
@@ -54,76 +53,27 @@ class ProjectDiscoveryService
                 'generationConfig' => $generationConfig,
             ]);
         } catch (AIProviderConfigurationException) {
-            Log::error('Gemini project discovery is not configured.', [
-                'provider' => 'gemini',
-            ]);
-
-            throw ProjectDiscoveryException::unavailable([
-                'http_status' => null,
-                'provider_status' => 'NOT_CONFIGURED',
-            ]);
-        } catch (ConnectionException) {
-            Log::warning('Gemini project discovery connection failed.', [
-                'provider' => 'gemini',
-                'failure' => 'connection',
-            ]);
-
-            throw ProjectDiscoveryException::unavailable([
-                'http_status' => 0,
-                'provider_status' => 'CONNECTION_FAILURE',
-            ]);
+            throw ProjectDiscoveryException::because(GeminiFailure::NOT_CONFIGURED);
+        } catch (ConnectionException $exception) {
+            throw new ProjectDiscoveryException(GeminiFailure::fromConnection($exception));
         } catch (JsonException) {
-            Log::warning('Gemini project discovery context could not be encoded.', [
-                'provider' => 'gemini',
-            ]);
-
-            throw ProjectDiscoveryException::unavailable([
-                'provider_status' => 'CONTEXT_ENCODE_FAILURE',
-            ]);
+            throw ProjectDiscoveryException::because(GeminiFailure::CONTEXT_ENCODING);
         }
 
+        // يُصنَّف فشل HTTP قبل أي محاولة لقراءة المخرجات المنظمة
         if ($response->failed()) {
-            $providerError = $response->json('error', []);
-            $providerError = is_array($providerError) ? $providerError : [];
-            $providerStatus = is_string($providerError['status'] ?? null)
-                ? $providerError['status']
-                : null;
-            $providerMessage = is_string($providerError['message'] ?? null)
-                ? $providerError['message']
-                : null;
-
-            Log::warning('Gemini project discovery request failed.', [
-                'provider' => 'gemini',
-                'status' => $response->status(),
-                'provider_status' => $providerStatus,
-            ]);
-
-            throw ProjectDiscoveryException::providerFailure(
-                $response->status(),
-                $providerStatus,
-                $providerMessage,
-                $apiKey
-            );
+            throw new ProjectDiscoveryException(GeminiFailure::fromResponse($response, $apiKey));
         }
 
         $extracted = GeminiStructuredOutput::extract($response);
         $normalizedOutput = $this->normalizeStructuredOutput($extracted['data']);
 
         if ($normalizedOutput === null) {
-            Log::warning('Gemini project discovery returned invalid structured output.', [
-                'provider' => 'gemini',
-                'finish_reason' => $extracted['diagnostic']['finish_reason'] ?? null,
+            throw ProjectDiscoveryException::because(GeminiFailure::INVALID_OUTPUT, array_filter([
                 'parse_error' => $extracted['diagnostic']['parse_error'] ?? 'schema_validation',
+                'finish_reason' => $extracted['diagnostic']['finish_reason'] ?? null,
                 'candidate_count' => $extracted['diagnostic']['candidate_count'] ?? null,
-                'text_part_count' => $extracted['diagnostic']['text_part_count'] ?? null,
-            ]);
-
-            throw ProjectDiscoveryException::unavailable([
-                'http_status' => $response->status(),
-                'provider_status' => 'INVALID_STRUCTURED_OUTPUT',
-                'parse_error' => $extracted['diagnostic']['parse_error'] ?? 'schema_validation',
-                'finish_reason' => $extracted['diagnostic']['finish_reason'] ?? null,
-            ]);
+            ], fn (mixed $value): bool => $value !== null), $response->status());
         }
 
         return $normalizedOutput;

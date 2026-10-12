@@ -322,7 +322,9 @@ class AdaptiveDiscoveryTest extends TestCase
         $this->actingAs($organization, 'sanctum')
             ->postJson("/api/organization/project-requests/{$projectRequest->id}/next-question")
             ->assertStatus(503)
-            ->assertJsonMissingPath('data');
+            ->assertJsonPath('error.code', 'ai_invalid_response')
+            ->assertJsonPath('data.status', 'pending')
+            ->assertJsonPath('data.question', null);
         $this->assertSame(0, $this->discoverySession($projectRequest)->responses()->count());
 
         $this->postJson("/api/organization/project-requests/{$projectRequest->id}/next-question")

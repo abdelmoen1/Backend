@@ -1,7 +1,6 @@
 <?php
 
 use App\Http\Controllers\Api\AuthController;
-use App\Http\Controllers\Auth\GoogleAuthController;
 use App\Http\Controllers\Api\OrganizationProfileController;
 use App\Http\Controllers\Api\ProfileImageController;
 use App\Http\Controllers\Api\ProjectDiscoveryController;
@@ -9,6 +8,8 @@ use App\Http\Controllers\Api\ProjectRequestController;
 use App\Http\Controllers\Api\SkillController;
 use App\Http\Controllers\Api\StudentProfileController;
 use App\Http\Controllers\Api\StudentSkillController;
+use App\Http\Controllers\Auth\GoogleAuthController;
+use App\Http\Middleware\AssignRequestId;
 use Illuminate\Support\Facades\Route;
 
 Route::post('/register', [AuthController::class, 'register'])->middleware('throttle:register');
@@ -43,7 +44,7 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::get('/organization/onboarding', [OrganizationProfileController::class, 'show']);
     Route::patch('/organization/onboarding', [OrganizationProfileController::class, 'update']);
 
-    Route::prefix('organization/project-requests')->group(function () {
+    Route::prefix('organization/project-requests')->middleware(AssignRequestId::class)->group(function () {
         Route::get('/', [ProjectRequestController::class, 'index']);
         Route::post('/', [ProjectRequestController::class, 'store']);
         Route::get('/{projectRequest}', [ProjectRequestController::class, 'show']);

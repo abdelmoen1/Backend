@@ -31,6 +31,7 @@ class TestProjectDiscoveryCommand extends Command
 
             if ($exception->providerDiagnostic !== null) {
                 $diagnostic = $exception->providerDiagnostic;
+                $this->line('Failure: '.($diagnostic['reason'] ?? 'unknown').' ('.$exception->errorCode().')');
                 $this->line('Provider HTTP status: '.($diagnostic['http_status'] ?? 'unknown'));
                 $this->line('Provider category: '.($diagnostic['provider_status'] ?? 'unspecified'));
                 if ($diagnostic['provider_message'] ?? null) {

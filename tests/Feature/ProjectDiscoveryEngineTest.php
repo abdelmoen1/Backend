@@ -25,6 +25,8 @@ class ProjectDiscoveryEngineTest extends TestCase
             'services.gemini.base_url' => 'https://generativelanguage.googleapis.com/v1beta',
             'services.gemini.model' => 'gemini-3.8-flash',
             'services.gemini.timeout' => 1,
+            'services.gemini.max_retries' => 2,
+            'services.gemini.retry_delay_ms' => 0,
         ]);
     }
 

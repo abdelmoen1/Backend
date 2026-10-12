@@ -8,10 +8,12 @@ use App\Models\IntakeResponse;
 use App\Models\IntakeSession;
 use App\Models\ProjectRequest;
 use App\Services\AI\DiscoveryRequirements;
+use App\Services\AI\GeminiFailure;
 use App\Services\AI\ProjectDiscoveryException;
 use App\Services\AI\ProjectDiscoveryService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Context;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Validator;
@@ -31,6 +33,20 @@ class ProjectDiscoveryController extends Controller
         Request $request,
         int $projectRequest,
         ProjectDiscoveryService $discovery
+    ): JsonResponse {
+        return $this->advance($request, $projectRequest, $discovery, 'next-question', false);
+    }
+
+    /**
+     * يطلب الخطوة التالية من Gemini ويحفظها. إجابة المؤسسة تُحفظ قبل الوصول إلى هنا، لذا فشل
+     * Gemini لا يمس المحفوظ، وإعادة المحاولة تعالج نفس المدخلات دون تكرار الإجابة.
+     */
+    private function advance(
+        Request $request,
+        int $projectRequest,
+        ProjectDiscoveryService $discovery,
+        string $endpoint,
+        bool $answerSaved
     ): JsonResponse {
         $record = $this->ownedProjectRequest($request, $projectRequest);
         if ($response = $this->ensureDiscoverable($record)) {
@@ -60,28 +76,25 @@ class ProjectDiscoveryController extends Controller
 
         $input = $this->newInput($record, $session);
         $context = $this->projectContext($record, $session, $input);
+        $startedAt = microtime(true);
 
         try {
-            $result = $discovery->nextStep($context);
+            $result = $this->reviewStep($discovery, $session, $context, $input, $discovery->nextStep($context));
         } catch (ProjectDiscoveryException $exception) {
-            return $this->discoveryFailureResponse($exception);
-        }
-
-        $result = $this->enforceReadiness($discovery, $session, $context, $input, $result);
-
-        if ($result['status'] === 'question' && $this->repeatsPreviousQuestion($session, $result['question'])) {
-            Log::warning('Gemini returned a repeated project discovery question.', [
-                'provider' => 'gemini',
-                'session_id' => $session->id,
-            ]);
-
-            return response()->json([
-                'success' => false,
-                'message' => 'تعذر إنشاء سؤال جديد للاكتشاف حاليًا. إجاباتك محفوظة، ويمكنك المحاولة مرة أخرى.',
-            ], 503);
+            return $this->discoveryFailureResponse($exception, $record, $session, $input, $endpoint, $answerSaved, $startedAt);
         }
 
         $state = $this->persistNextStep($record, $session, $result, $input);
+
+        Log::info('Project discovery step completed.', [
+            'endpoint' => $endpoint,
+            'project_request_id' => $record->id,
+            'session_id' => $session->id,
+            'status' => $state['status'],
+            'requirement_updates' => count($result['updates'] ?? []),
+            'duration_ms' => $this->elapsedMs($startedAt),
+            'gemini_attempts' => Context::getHidden('gemini_attempts'),
+        ]);
 
         return $this->discoveryResponse(
             $state['session'],
@@ -138,7 +151,7 @@ class ProjectDiscoveryController extends Controller
             }
 
             // إعادة إرسال نفس الإجابة (مثل إعادة المحاولة بعد فشل جزئي) آمنة ولا تكرر الحفظ
-            return $this->nextQuestion($request, $projectRequest, $discovery);
+            return $this->advance($request, $projectRequest, $discovery, 'answer', true);
         }
 
         if ($session->current_question_id !== $answerRecord->question_id) {
@@ -205,7 +218,7 @@ class ProjectDiscoveryController extends Controller
         }
 
         // الإجابة محفوظة الآن؛ إذا فشل طلب Gemini التالي تبقى الإجابة وتُعالج عند إعادة المحاولة
-        return $this->nextQuestion($request, $projectRequest, $discovery);
+        return $this->advance($request, $projectRequest, $discovery, 'answer', true);
     }
 
     /**
@@ -370,54 +383,71 @@ class ProjectDiscoveryController extends Controller
     }
 
     /**
-     * لا نقبل إنهاء الاكتشاف قبل فهم المحاور الأساسية. نطلب من Gemini مرة واحدة فقط سؤالًا
-     * عن المحور الناقص؛ وإن أصر على الإنهاء نقبله ونسجل المحاور الناقصة كنقاط مفتوحة،
-     * حتى لا تنشأ حلقة لا نهائية أو تكلفة غير محدودة.
+     * يراجع خطوة Gemini قبل حفظها: إنهاء قبل فهم المحاور الأساسية، أو سؤال سبق طرحه بنفس النص.
+     * في الحالتين نطلب من Gemini تصحيحًا واحدًا فقط حتى لا تنشأ حلقة أو تكلفة غير محدودة.
+     * إن أصر على الإنهاء نقبله ونسجل المحاور الناقصة كنقاط مفتوحة؛ أما السؤال المكرر فلا يُعرض
+     * أبدًا ويُعاد خطأ قابل لإعادة المحاولة.
      */
-    private function enforceReadiness(
+    private function reviewStep(
         ProjectDiscoveryService $discovery,
         IntakeSession $session,
         array $context,
         array $input,
         array $result
     ): array {
-        if ($result['status'] !== 'complete' || ! array_key_exists('updates', $result)) {
+        $projected = array_key_exists('updates', $result)
+            ? $this->projectRequirements($session, $result, $input)
+            : null;
+        $missing = $result['status'] === 'complete' && $projected !== null
+            ? DiscoveryRequirements::missingCoreAreas($projected)
+            : [];
+        $repeated = $result['status'] === 'question'
+            && $this->repeatsPreviousQuestion($session, $result['question']);
+
+        if ($missing === [] && ! $repeated) {
             return $result;
         }
 
-        $projected = DiscoveryRequirements::apply(
-            DiscoveryRequirements::from($session->current_state ?? []),
-            $result['updates'],
-            $result['coverage'] ?? [],
-            $input['source']
-        );
-        $missing = DiscoveryRequirements::missingCoreAreas($projected);
-        if ($missing === []) {
-            return $result;
-        }
-
-        Log::info('Gemini tried to complete discovery before core areas were covered.', [
+        Log::info('Gemini discovery step needs one correction.', [
             'provider' => 'gemini',
             'session_id' => $session->id,
+            'issue' => $repeated ? 'repeated_question' : 'premature_completion',
             'missing_core_areas' => $missing,
         ]);
 
+        // التصحيح يرى ما استُخرج للتو، فلا يُرسل الإدخال الجديد مرة أخرى
         $retryContext = $context;
-        $retryContext['requirements_state'] = DiscoveryRequirements::forPrompt($projected);
-        $retryContext['new_organization_input'] = [];
-        $retryContext['readiness']['missing_core_areas'] = DiscoveryRequirements::labels($missing);
-        $retryContext['readiness']['ready_for_proposal'] = false;
-        $retryContext['completion_rejected'] = [
-            'missing_core_areas' => array_map(
-                fn (string $area): array => ['area' => $area, 'label' => DiscoveryRequirements::AREAS[$area]],
-                $missing
-            ),
-            'instruction' => 'لم تتضح هذه المحاور الأساسية بعد. اسأل سؤالًا واحدًا عن أهم محور ناقص منها بدل إنهاء الاكتشاف.',
-        ];
+        if ($projected !== null) {
+            $retryContext['requirements_state'] = DiscoveryRequirements::forPrompt($projected);
+            $retryContext['new_organization_input'] = [];
+            $retryContext['readiness']['missing_core_areas'] = DiscoveryRequirements::labels(
+                DiscoveryRequirements::missingCoreAreas($projected)
+            );
+            $retryContext['readiness']['ready_for_proposal'] = $missing === []
+                && DiscoveryRequirements::missingCoreAreas($projected) === [];
+        }
+        if ($missing !== []) {
+            $retryContext['completion_rejected'] = [
+                'missing_core_areas' => array_map(
+                    fn (string $area): array => ['area' => $area, 'label' => DiscoveryRequirements::AREAS[$area]],
+                    $missing
+                ),
+                'instruction' => 'لم تتضح هذه المحاور الأساسية بعد. اسأل سؤالًا واحدًا عن أهم محور ناقص منها بدل إنهاء الاكتشاف.',
+            ];
+        }
+        if ($repeated) {
+            $retryContext['repeated_question_rejected'] = [
+                'question' => $result['question']['text_ar'],
+                'instruction' => 'سبق طرح هذا السؤال في المحادثة. لا تكرره ولو بصياغة أخرى؛ اسأل عن معلومة مختلفة ما زالت ناقصة، أو أنهِ الاكتشاف إن كانت المعلومات كافية.',
+            ];
+        }
 
         try {
             $retry = $discovery->nextStep($retryContext);
-        } catch (ProjectDiscoveryException) {
+        } catch (ProjectDiscoveryException $exception) {
+            if ($repeated) {
+                throw $exception;
+            }
             $retry = null;
         }
 
@@ -426,20 +456,59 @@ class ProjectDiscoveryController extends Controller
             && $retry['status'] === 'question'
             && ! $this->repeatsPreviousQuestion($session, $retry['question'])
         ) {
-            $merged = [
-                'status' => 'question',
-                'question' => $retry['question'],
-                'updates' => array_merge($result['updates'], $retry['updates'] ?? []),
-                'coverage' => array_merge($result['coverage'] ?? [], $retry['coverage'] ?? []),
-            ];
-            $reply = $result['reply'] ?? $retry['reply'] ?? null;
-            if ($reply !== null) {
-                $merged['reply'] = $reply;
-            }
-
-            return $merged;
+            return $this->mergeCorrection($result, $retry);
         }
 
+        if ($repeated && $retry['status'] !== 'complete') {
+            throw ProjectDiscoveryException::because(GeminiFailure::REPEATED_QUESTION);
+        }
+
+        return $this->withOpenQuestionsForMissingCore(
+            $session,
+            $repeated ? $this->mergeCorrection($result, $retry) : $result,
+            $input
+        );
+    }
+
+    private function projectRequirements(IntakeSession $session, array $result, array $input): array
+    {
+        return DiscoveryRequirements::apply(
+            DiscoveryRequirements::from($session->current_state ?? []),
+            $result['updates'] ?? [],
+            $result['coverage'] ?? [],
+            $input['source']
+        );
+    }
+
+    /** يدمج نتيجة التصحيح مع الخطوة الأولى: ما استُخرج في الخطوتين، ورد الإقرار الأول. */
+    private function mergeCorrection(array $first, array $retry): array
+    {
+        $merged = [
+            'status' => $retry['status'],
+            'coverage' => array_merge($first['coverage'] ?? [], $retry['coverage'] ?? []),
+        ];
+        if ($retry['status'] === 'question') {
+            $merged['question'] = $retry['question'];
+        }
+        // وجود updates يعني تحديث الحالة المنظمة؛ لا نضيفه لاستجابة قديمة الشكل
+        if (array_key_exists('updates', $first) || array_key_exists('updates', $retry)) {
+            $merged['updates'] = array_merge($first['updates'] ?? [], $retry['updates'] ?? []);
+        }
+        $reply = $first['reply'] ?? $retry['reply'] ?? null;
+        if ($reply !== null) {
+            $merged['reply'] = $reply;
+        }
+
+        return $merged;
+    }
+
+    private function withOpenQuestionsForMissingCore(IntakeSession $session, array $result, array $input): array
+    {
+        if (! array_key_exists('updates', $result)) {
+            return $result;
+        }
+
+        $missing = DiscoveryRequirements::missingCoreAreas($this->projectRequirements($session, $result, $input));
         foreach ($missing as $area) {
             $result['updates'][] = [
                 'area' => $area,
@@ -470,14 +539,34 @@ class ProjectDiscoveryController extends Controller
             ->all();
     }
 
+    /** تكرار النص هو التكرار الحقيقي؛ تكرار المعرّف وحده يُعالج في uniqueQuestionId. */
     private function repeatsPreviousQuestion(IntakeSession $session, array $question): bool
     {
         $normalizedText = mb_strtolower(trim($question['text_ar']));
 
         return $session->responses()->get()->contains(
-            fn (IntakeResponse $response): bool => $response->question_id === $question['id']
-                || mb_strtolower(trim($response->question_text)) === $normalizedText
+            fn (IntakeResponse $response): bool => mb_strtolower(trim($response->question_text)) === $normalizedText
         );
+    }
+
+    /**
+     * معرّف السؤال يولّده Gemini ولا معنى له خارج الجلسة؛ إن سبق استخدامه (أو بدا كدور تعديل)
+     * نمنحه معرّفًا جديدًا بدل رفض سؤال صالح.
+     */
+    private function uniqueQuestionId(IntakeSession $session, string $id): string
+    {
+        $used = $session->responses()->pluck('question_id')->all();
+        if (! in_array($id, $used, true) && ! str_starts_with($id, self::REVISION_PREFIX)) {
+            return $id;
+        }
+
+        $base = mb_substr(str_starts_with($id, self::REVISION_PREFIX) ? 'q_'.$id : $id, 0, 200);
+        $suffix = count($used) + 1;
+        while (in_array("{$base}_{$suffix}", $used, true)) {
+            $suffix++;
+        }
+
+        return "{$base}_{$suffix}";
     }
 
     private function persistNextStep(
@@ -542,6 +631,7 @@ class ProjectDiscoveryController extends Controller
             }
 
             $question = $result['question'];
+            $question['id'] = $this->uniqueQuestionId($lockedSession, $question['id']);
             $sequence = (int) $lockedSession->responses()->max('sequence') + 1;
             $lockedSession->responses()->create([
                 'sequence' => $sequence,
@@ -696,36 +786,45 @@ class ProjectDiscoveryController extends Controller
         ?array $question = null,
         ?ProjectRequest $record = null
     ): JsonResponse {
+        return response()->json([
+            'success' => true,
+            'data' => $this->discoveryPayload($session, $status, $question, $record),
+        ]);
+    }
+
+    private function discoveryPayload(
+        IntakeSession $session,
+        string $status,
+        ?array $question = null,
+        ?ProjectRequest $record = null
+    ): array {
         $state = $session->current_state ?? [];
         $skipped = is_array($state['skipped_questions'] ?? null) ? $state['skipped_questions'] : [];
 
-        return response()->json([
-            'success' => true,
-            'data' => [
-                'session_id' => $session->id,
-                'status' => $status,
-                'question' => $question,
-                'history' => $session->responses()
-                    ->get()
-                    ->map(fn (IntakeResponse $response): array => [
-                        'sequence' => $response->sequence,
-                        'kind' => $this->isRevisionTurn($response) ? 'revision' : 'question',
-                        'question' => $this->questionPayload($session, $response),
-                        'assistant_reply' => $state['turns'][$response->question_id]['reply'] ?? null,
-                        'selected_answer' => $response->selected_answer,
-                        'custom_answer' => $response->custom_answer,
-                        'answered_at' => $response->answered_at?->toISOString(),
-                        'skipped' => in_array($response->question_id, $skipped, true),
-                    ])
-                    ->all(),
-                'requirements' => DiscoveryRequirements::publicView($state),
-                'completion_message' => $status === 'complete'
-                    ? ($state['completion_reply'] ?? null)
-                    : null,
-                'project_status' => $record?->status,
-                'has_proposal' => is_array($record?->proposal),
-            ],
-        ]);
+        return [
+            'session_id' => $session->id,
+            'status' => $status,
+            'question' => $question,
+            'history' => $session->responses()
+                ->get()
+                ->map(fn (IntakeResponse $response): array => [
+                    'sequence' => $response->sequence,
+                    'kind' => $this->isRevisionTurn($response) ? 'revision' : 'question',
+                    'question' => $this->questionPayload($session, $response),
+                    'assistant_reply' => $state['turns'][$response->question_id]['reply'] ?? null,
+                    'selected_answer' => $response->selected_answer,
+                    'custom_answer' => $response->custom_answer,
+                    'answered_at' => $response->answered_at?->toISOString(),
+                    'skipped' => in_array($response->question_id, $skipped, true),
+                ])
+                ->all(),
+            'requirements' => DiscoveryRequirements::publicView($state),
+            'completion_message' => $status === 'complete'
+                ? ($state['completion_reply'] ?? null)
+                : null,
+            'project_status' => $record?->status,
+            'has_proposal' => is_array($record?->proposal),
+        ];
     }
 
     private function staleAnswerResponse(): JsonResponse
@@ -736,18 +835,72 @@ class ProjectDiscoveryController extends Controller
         ], 409);
     }
 
-    private function discoveryFailureResponse(ProjectDiscoveryException $exception): JsonResponse
-    {
+    /**
+     * فشل خطوة الذكاء الاصطناعي: سطر سجل واحد يحدد المرحلة والسبب، واستجابة 503 آمنة تحمل
+     * رمزًا عامًا ومعرّف الطلب والمحادثة المحفوظة (status=pending) حتى تعرضها الواجهة وتتابع
+     * عبر next-question دون إعادة إرسال الإجابة. نستخدم 503 دائمًا لأن بعض البوابات تستبدل
+     * محتوى 502/504 بصفحاتها فتضيع الرسالة وترويسات CORS.
+     */
+    private function discoveryFailureResponse(
+        ProjectDiscoveryException $exception,
+        ProjectRequest $record,
+        IntakeSession $session,
+        array $input,
+        string $endpoint,
+        bool $answerSaved,
+        float $startedAt
+    ): JsonResponse {
+        $failure = $exception->failure;
+        $requestId = Context::get('request_id');
+
+        Log::warning('Project discovery AI step failed.', array_filter([
+            'endpoint' => $endpoint,
+            'stage' => in_array($failure->reason, [GeminiFailure::INVALID_OUTPUT, GeminiFailure::REPEATED_QUESTION], true)
+                ? 'ai_response_validation'
+                : 'ai_request',
+            'project_request_id' => $record->id,
+            'session_id' => $session->id,
+            'error_code' => $exception->errorCode(),
+            'model' => (string) config('services.gemini.model'),
+            'gemini_attempts' => Context::getHidden('gemini_attempts'),
+            'answer_persisted' => $answerSaved,
+            'unprocessed_answers' => count(array_filter(
+                $input['entries'],
+                fn (array $entry): bool => $entry['kind'] !== 'project_form'
+            )),
+            'duration_ms' => $this->elapsedMs($startedAt),
+            ...$failure->diagnostic(),
+        ], fn (mixed $value): bool => $value !== null));
+
         $payload = [
             'success' => false,
             'message' => $exception->getMessage(),
+            'error' => [
+                'code' => $exception->errorCode(),
+                'retryable' => $exception->retryable(),
+                'retry_after' => $exception->retryAfter(),
+            ],
+            'request_id' => $requestId,
+            'data' => $this->discoveryPayload($session->fresh() ?? $session, 'pending', null, $record->fresh() ?? $record),
         ];
-
-        if (config('app.debug') && $exception->providerDiagnostic !== null) {
+        if ($endpoint === 'answer') {
+            $payload['answer_saved'] = $answerSaved;
+        }
+        if (config('app.debug')) {
             $payload['debug'] = $exception->providerDiagnostic;
         }
 
-        return response()->json($payload, 503);
+        $response = response()->json($payload, 503);
+        if ($exception->retryAfter() !== null) {
+            $response->headers->set('Retry-After', (string) $exception->retryAfter());
+        }
+
+        return $response;
+    }
+
+    private function elapsedMs(float $startedAt): int
+    {
+        return (int) round((microtime(true) - $startedAt) * 1000);
     }
 
     private function ensureDiscoverable(ProjectRequest $record): ?JsonResponse

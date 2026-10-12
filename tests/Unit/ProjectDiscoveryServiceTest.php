@@ -2,6 +2,7 @@
 
 namespace Tests\Unit;
 
+use App\Services\AI\GeminiFailure;
 use App\Services\AI\ProjectDiscoveryException;
 use App\Services\AI\ProjectDiscoveryService;
 use Illuminate\Http\Client\ConnectionException;
@@ -20,6 +21,8 @@ class ProjectDiscoveryServiceTest extends TestCase
             'services.gemini.base_url' => 'https://generativelanguage.googleapis.com/v1beta',
             'services.gemini.model' => 'gemini-3.8-flash',
             'services.gemini.timeout' => 30,
+            'services.gemini.max_retries' => 2,
+            'services.gemini.retry_delay_ms' => 0,
         ]);
     }
 
@@ -196,18 +199,78 @@ class ProjectDiscoveryServiceTest extends TestCase
 
     public function test_it_handles_connection_failures_without_exposing_details(): void
     {
-        Http::fake(function (): never {
-            throw new ConnectionException('connection timeout detail');
+        $cases = [
+            ['connection timeout detail at internal-host', 'ai_timeout', GeminiFailure::TIMEOUT, 1],
+            ['cURL error 7: Failed to connect to internal-host', 'ai_temporarily_unavailable', GeminiFailure::CONNECTION_FAILED, 2],
+        ];
+
+        // Http::fake يضيف المحاكيات ولا يستبدلها، لذا محاكاة واحدة تقرأ الحالة الحالية
+        $message = '';
+        $sent = 0;
+        Http::fake(function () use (&$message, &$sent): never {
+            $sent++;
+            throw new ConnectionException($message);
         });
 
-        try {
-            app(ProjectDiscoveryService::class)->nextStep([]);
-            $this->fail('Expected a connection failure to be handled.');
-        } catch (ProjectDiscoveryException $exception) {
-            $this->assertSame(
-                'تعذر التواصل مع خدمة الذكاء الاصطناعي حاليًا.',
-                $exception->getMessage()
-            );
+        foreach ($cases as [$message, $code, $reason, $attempts]) {
+            $sent = 0;
+
+            try {
+                app(ProjectDiscoveryService::class)->nextStep([]);
+                $this->fail('Expected a connection failure to be handled.');
+            } catch (ProjectDiscoveryException $exception) {
+                $this->assertSame($code, $exception->errorCode());
+                $this->assertSame($reason, $exception->providerDiagnostic['reason']);
+                $this->assertTrue($exception->retryable());
+                $this->assertStringNotContainsString('internal-host', $exception->getMessage());
+                $this->assertStringNotContainsString('internal-host', json_encode($exception->providerDiagnostic));
+            }
+            // انتهاء المهلة لا يُعاد داخل الطلب؛ فشل الاتصال السريع يُعاد ضمن الحد
+            $this->assertSame($attempts, $sent);
+        }
+    }
+
+    public function test_provider_failures_are_classified_with_safe_public_codes(): void
+    {
+        $quotaFailure = fn (string $quotaId, string $delay): array => ['error' => [
+            'code' => 429,
+            'status' => 'RESOURCE_EXHAUSTED',
+            'message' => 'You exceeded your current quota.',
+            'details' => [
+                ['@type' => 'type.googleapis.com/google.rpc.QuotaFailure', 'violations' => [['quotaId' => $quotaId]]],
+                ['@type' => 'type.googleapis.com/google.rpc.RetryInfo', 'retryDelay' => $delay],
+            ],
+        ]];
+        $cases = [
+            'overloaded' => [['error' => ['status' => 'UNAVAILABLE', 'message' => 'The model is overloaded.']], 503, 'ai_temporarily_unavailable', GeminiFailure::UPSTREAM_UNAVAILABLE, true, 5],
+            'per minute limit' => [$quotaFailure('GenerateRequestsPerMinutePerProjectPerModel-FreeTier', '37s'), 429, 'ai_rate_limited', GeminiFailure::RATE_LIMITED, true, 37],
+            'daily quota' => [$quotaFailure('GenerateRequestsPerDayPerProjectPerModel-FreeTier', '12s'), 429, 'ai_quota_exhausted', GeminiFailure::QUOTA_EXHAUSTED, false, null],
+            'invalid key' => [['error' => ['status' => 'INVALID_ARGUMENT', 'message' => 'API key not valid.', 'details' => [['reason' => 'API_KEY_INVALID']]]], 400, 'ai_configuration_error', GeminiFailure::INVALID_CREDENTIALS, false, null],
+            'invalid payload' => [['error' => ['status' => 'INVALID_ARGUMENT', 'message' => 'Invalid JSON payload received.']], 400, 'ai_configuration_error', GeminiFailure::INVALID_REQUEST, false, null],
+            'unsupported location' => [['error' => ['status' => 'FAILED_PRECONDITION', 'message' => 'User location is not supported for the API use.']], 400, 'ai_configuration_error', GeminiFailure::PRECONDITION_FAILED, false, null],
+            'permission' => [['error' => ['status' => 'PERMISSION_DENIED', 'message' => 'Permission denied.']], 403, 'ai_configuration_error', GeminiFailure::PERMISSION_DENIED, false, null],
+            'unknown model' => [['error' => ['status' => 'NOT_FOUND', 'message' => 'models/x is not found for API version v1beta.']], 404, 'ai_configuration_error', GeminiFailure::MODEL_NOT_FOUND, false, null],
+        ];
+
+        $current = [];
+        Http::fake(function () use (&$current) {
+            return Http::response($current[0], $current[1]);
+        });
+
+        foreach ($cases as $name => [$body, $status, $code, $reason, $retryable, $retryAfter]) {
+            $current = [$body, $status];
+
+            try {
+                app(ProjectDiscoveryService::class)->nextStep([]);
+                $this->fail("Expected the {$name} failure to be handled.");
+            } catch (ProjectDiscoveryException $exception) {
+                $this->assertSame($code, $exception->errorCode(), $name);
+                $this->assertSame($reason, $exception->providerDiagnostic['reason'], $name);
+                $this->assertSame($status, $exception->providerDiagnostic['http_status'], $name);
+                $this->assertSame($retryable, $exception->retryable(), $name);
+                $this->assertSame($retryAfter, $exception->retryAfter(), $name);
+                $this->assertDoesNotMatchRegularExpression('/[A-Za-z]/', $exception->getMessage(), $name);
+            }
         }
     }
 
@@ -238,13 +301,18 @@ class ProjectDiscoveryServiceTest extends TestCase
                 ]), 200),
         ]);
 
-        foreach (range(1, 2) as $_) {
+        foreach (['invalid_json', 'schema_validation'] as $parseError) {
             try {
                 app(ProjectDiscoveryService::class)->nextStep([]);
                 $this->fail('Expected invalid structured output to be rejected.');
             } catch (ProjectDiscoveryException $exception) {
+                $this->assertSame('ai_invalid_response', $exception->errorCode());
+                $this->assertSame(GeminiFailure::INVALID_OUTPUT, $exception->providerDiagnostic['reason']);
+                $this->assertSame($parseError, $exception->providerDiagnostic['parse_error']);
+                $this->assertSame('STOP', $exception->providerDiagnostic['finish_reason']);
+                $this->assertTrue($exception->retryable());
                 $this->assertSame(
-                    'تعذر التواصل مع خدمة الذكاء الاصطناعي حاليًا.',
+                    'تعذر إنشاء سؤال جديد للاكتشاف حاليًا. إجاباتك محفوظة، ويمكنك المحاولة مرة أخرى.',
                     $exception->getMessage()
                 );
             }
@@ -260,10 +328,10 @@ class ProjectDiscoveryServiceTest extends TestCase
             app(ProjectDiscoveryService::class)->nextStep([]);
             $this->fail('Expected missing configuration to be rejected.');
         } catch (ProjectDiscoveryException $exception) {
-            $this->assertSame(
-                'تعذر التواصل مع خدمة الذكاء الاصطناعي حاليًا.',
-                $exception->getMessage()
-            );
+            $this->assertSame('ai_configuration_error', $exception->errorCode());
+            $this->assertSame(GeminiFailure::NOT_CONFIGURED, $exception->providerDiagnostic['reason']);
+            $this->assertFalse($exception->retryable());
+            $this->assertNull($exception->retryAfter());
         }
 
         Http::assertNothingSent();
