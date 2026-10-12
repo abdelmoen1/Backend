@@ -17,12 +17,16 @@ final class SkillLevels
 
     public const ADVANCED = 'advanced';
 
-    public const ALL = [self::BEGINNER, self::INTERMEDIATE, self::ADVANCED];
+    public const EXPERT = 'expert';
+
+    /** بترتيب تصاعدي: مبتدئ < متوسط < متقدم < خبير */
+    public const ALL = [self::BEGINNER, self::INTERMEDIATE, self::ADVANCED, self::EXPERT];
 
     public const LABELS = [
         self::BEGINNER => 'مبتدئ',
         self::INTERMEDIATE => 'متوسط',
         self::ADVANCED => 'متقدم',
+        self::EXPERT => 'خبير',
     ];
 
     public static function valid(mixed $level): bool
@@ -30,7 +34,7 @@ final class SkillLevels
         return is_string($level) && in_array($level, self::ALL, true);
     }
 
-    /** 1..3؛ 0 لقيمة غير معروفة (لا تستوفي أي حد أدنى). */
+    /** 1..4؛ 0 لقيمة غير معروفة (لا تستوفي أي حد أدنى). */
     public static function rank(?string $level): int
     {
         $index = $level === null ? false : array_search($level, self::ALL, true);

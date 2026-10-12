@@ -61,6 +61,7 @@ class OpportunityMatcher
         SkillLevels::BEGINNER => 'مستوى مبتدئًا',
         SkillLevels::INTERMEDIATE => 'مستوى متوسطًا',
         SkillLevels::ADVANCED => 'مستوى متقدمًا',
+        SkillLevels::EXPERT => 'مستوى خبيرًا',
     ];
 
     /** يستطيع المستخدم تصفح الفرص إذا كان طالبًا أكمل ملفه (الإعداد الأولي). */

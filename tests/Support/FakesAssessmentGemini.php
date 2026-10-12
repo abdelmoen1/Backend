@@ -2,6 +2,7 @@
 
 namespace Tests\Support;
 
+use App\Services\Assessments\AssessmentQuestionGenerator;
 use Closure;
 use GuzzleHttp\Promise\PromiseInterface;
 use Illuminate\Http\Client\Factory;
@@ -65,37 +66,63 @@ trait FakesAssessmentGemini
         ));
     }
 
-    /** أنواع أسئلة صالحة بالترتيب: 7 عملية ثم 3 كتابية */
-    protected const PROGRAMMING_TYPES = ['coding', 'debugging', 'sql', 'implementation', 'code_analysis', 'coding', 'implementation', 'explanation', 'reasoning', 'technical_analysis'];
+    protected const PROGRAMMING_TYPES = ['coding', 'debugging', 'sql', 'implementation', 'code_analysis'];
 
-    protected const NON_PROGRAMMING_TYPES = ['scenario', 'design_task', 'case_study', 'scenario', 'design_task', 'case_study', 'scenario', 'explanation', 'reasoning', 'technical_analysis'];
+    protected const NON_PROGRAMMING_TYPES = ['scenario', 'design_task', 'case_study'];
 
     /**
-     * محاولة مولدة صالحة لمهارة واحدة: 10 أسئلة (7 عملية + 3 كتابية) بالمستوى المطلوب، لكل منها معياران
-     * (6 + 4 نقاط) وقيم سرية يسهل البحث عنها. $variant يغيّر نصوص الأسئلة لمحاكاة مجموعة جديدة.
+     * جلسة مولدة صالحة: 9 أسئلة عملية موزعة على المهارات كما يوزعها الخادم + مقال واحد بمعيار لكل مهارة (5 نقاط).
+     * لكل سؤال عملي معياران (6 + 4 نقاط) لمهارته وقيم سرية يسهل البحث عنها. $variant يغيّر النصوص لمحاكاة مجموعة جديدة.
+     *
+     * @param  array<int, string|array{0: string, 1: bool}>  $skills  معرّف المهارة => المستوى، أو [المستوى، برمجية؟]، بترتيب الاختيار
      */
-    protected function generatedAssessment(int $skillId, string $level = 'intermediate', bool $programming = true, string $variant = 'A'): array
+    protected function generatedAssessment(array $skills, string $variant = 'A'): array
     {
+        $distribution = AssessmentQuestionGenerator::practicalDistribution(count($skills), 9);
         $questions = [];
-        foreach ($programming ? self::PROGRAMMING_TYPES : self::NON_PROGRAMMING_TYPES as $index => $type) {
-            $number = $index + 1;
-            $questions[] = [
-                'skill_id' => $skillId,
-                'type' => $type,
-                'difficulty' => $level,
-                'prompt' => "سؤال {$type} رقم {$number} للمهارة {$skillId} بمستوى {$level} (مجموعة {$variant}).",
-                'code_context' => in_array($type, ['debugging', 'code_analysis'], true) ? "<?php\n\$items = [1, 2];\necho \$items[2];" : '',
-                'language' => $programming && in_array($type, ['coding', 'debugging', 'implementation', 'code_analysis'], true) ? 'php' : ($type === 'sql' ? 'sql' : ''),
-                'criteria' => [
-                    ['description' => 'يشرح الفكرة الأساسية بدقة.', 'points' => 6],
-                    ['description' => 'يذكر مثالًا صحيحًا.', 'points' => 4],
-                ],
-                'reference_answer' => "SECRET-REFERENCE-{$skillId}-{$number}",
-                'key_concepts' => ['SECRET-CONCEPT'],
-                'common_mistakes' => ['SECRET-MISTAKE'],
-                'minimum_evidence' => 'SECRET-MINIMUM-EVIDENCE',
-            ];
+        $number = 0;
+        foreach (array_keys($skills) as $index => $skillId) {
+            [$level, $programming] = is_array($skills[$skillId]) ? $skills[$skillId] : [$skills[$skillId], true];
+            $types = $programming ? self::PROGRAMMING_TYPES : self::NON_PROGRAMMING_TYPES;
+            foreach (range(1, $distribution[$index]) as $count) {
+                $number++;
+                $type = $types[($count - 1) % count($types)];
+                $questions[] = [
+                    'skill_id' => $skillId,
+                    'type' => $type,
+                    'difficulty' => $level,
+                    'prompt' => "سؤال {$type} رقم {$number} للمهارة {$skillId} بمستوى {$level} (مجموعة {$variant}).",
+                    'code_context' => in_array($type, ['debugging', 'code_analysis'], true) ? "<?php\n\$items = [1, 2];\necho \$items[2];" : '',
+                    'language' => $type === 'sql' ? 'sql' : ($programming ? 'php' : ''),
+                    'criteria' => [
+                        ['skill_id' => $skillId, 'description' => 'يشرح الفكرة الأساسية بدقة.', 'points' => 6],
+                        ['skill_id' => $skillId, 'description' => 'يذكر مثالًا صحيحًا.', 'points' => 4],
+                    ],
+                    'reference_answer' => "SECRET-REFERENCE-{$skillId}-{$number}",
+                    'key_concepts' => ['SECRET-CONCEPT'],
+                    'common_mistakes' => ['SECRET-MISTAKE'],
+                    'minimum_evidence' => 'SECRET-MINIMUM-EVIDENCE',
+                ];
+            }
         }
+
+        $questions[] = [
+            'skill_id' => null,
+            'type' => 'essay',
+            'difficulty' => null,
+            'prompt' => "مقال يربط المهارات المختارة في قرار تصميم واحد (مجموعة {$variant}).",
+            'code_context' => '',
+            'language' => '',
+            'criteria' => array_map(fn (int $skillId): array => [
+                'skill_id' => $skillId,
+                'description' => "يوضح دور المهارة {$skillId} في القرار.",
+                'points' => 5,
+            ], array_keys($skills)),
+            'reference_answer' => 'SECRET-REFERENCE-ESSAY',
+            'key_concepts' => ['SECRET-CONCEPT'],
+            'common_mistakes' => ['SECRET-MISTAKE'],
+            'minimum_evidence' => 'SECRET-MINIMUM-EVIDENCE',
+        ];
 
         return ['title' => 'تقييم تجريبي', 'questions' => $questions];
     }

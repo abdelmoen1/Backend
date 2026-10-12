@@ -31,7 +31,7 @@ class ProjectStaffingLevelsTest extends TestCase
                 // مهارة مرغوبة وليست إلزامية
                 ['skill' => 'MySQL', 'level' => 'advanced'],
                 // مستوى غير معروف
-                ['skill' => 'REST API', 'level' => 'expert'],
+                ['skill' => 'REST API', 'level' => 'guru'],
                 'not-an-object',
             ],
         ]]);

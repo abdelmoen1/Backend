@@ -18,59 +18,148 @@ class AssessmentValidationTest extends TestCase
 {
     use FakesAssessmentGemini;
 
-    public function test_generated_questions_must_match_the_skill_level_and_exact_question_mix(): void
+    public function test_practical_questions_are_distributed_with_at_least_three_per_skill(): void
+    {
+        $this->assertSame([9], AssessmentQuestionGenerator::practicalDistribution(1, 9));
+        $this->assertSame([5, 4], AssessmentQuestionGenerator::practicalDistribution(2, 9));
+        $this->assertSame([3, 3, 3], AssessmentQuestionGenerator::practicalDistribution(3, 9));
+        // أربع مهارات لا تحقق حد 3 أسئلة لكل مهارة (لهذا الحد الأقصى 3)
+        $this->assertSame(2, min(AssessmentQuestionGenerator::practicalDistribution(4, 9)));
+    }
+
+    public function test_generated_sessions_must_match_the_plan_levels_and_skill_rubrics(): void
     {
         $generator = app(AssessmentQuestionGenerator::class);
-        $skill = new Skill(['name' => 'PHP']);
-        $skill->id = 10;
-        $mix = ['practical' => 7, 'written' => 3];
-        $valid = $this->generatedAssessment(10, 'intermediate');
+        $plan = [$this->plan(10, 'PHP', 'intermediate', 5), $this->plan(20, 'Figma', 'expert', 4, programming: false)];
+        $valid = $this->generatedAssessment([10 => 'intermediate', 20 => ['expert', false]]);
 
-        $result = $generator->validate($valid, $skill, 'intermediate', true, $mix);
+        $result = $generator->validate($valid, $plan, 1);
         $this->assertSame(array_map(fn (int $n): string => "q{$n}", range(1, 10)), array_column($result['questions'], 'id'));
-        $this->assertSame(array_fill(0, 10, 10), array_column($result['questions'], 'skill_id'));
-        $this->assertSame([...array_fill(0, 7, 'practical'), ...array_fill(0, 3, 'written')], array_column($result['questions'], 'category'));
-        $this->assertSame(10, $result['questions'][0]['max_points']);
+        $this->assertSame([...array_fill(0, 5, 10), ...array_fill(0, 4, 20), null], array_column($result['questions'], 'skill_id'));
+        $this->assertSame([...array_fill(0, 9, 'practical'), 'written'], array_column($result['questions'], 'category'));
+        $this->assertSame([10, 20], $result['questions'][9]['skill_ids']);
+        $this->assertSame([10, 20], array_column($result['questions'][9]['rubric']['criteria'], 'skill_id'));
+        $this->assertSame(['scenario', 'text'], [$result['questions'][5]['type'], $result['questions'][5]['format']]);
         $this->assertArrayNotHasKey('options', $result['questions'][0]);
 
-        // التركيبة من الإعدادات المحفوظة: 6/4 صالحة فقط إذا طُلبت كذلك
-        $sixFour = $valid;
-        $sixFour['questions'][0]['type'] = 'explanation';
-        $this->assertNull($generator->validate($sixFour, $skill, 'intermediate', true, $mix));
-        $this->assertNotNull($generator->validate($sixFour, $skill, 'intermediate', true, ['practical' => 6, 'written' => 4]));
-        // مستوى آخر، أو نوع غير برمجي لمهارة برمجية، أو أسئلة كتابية فقط لمهارة غير برمجية
-        $this->assertNull($generator->validate($valid, $skill, 'beginner', true, $mix));
-        $this->assertNull($generator->validate($valid, $skill, 'intermediate', false, $mix));
-        $this->assertNotNull($generator->validate($this->generatedAssessment(10, 'beginner', false), $skill, 'beginner', false, $mix));
-        // عدد خاطئ، أو أسئلة مكررة داخل المحاولة، أو مطابقة حرفيًا لسؤال سابق
-        $this->assertNull($generator->validate(['questions' => array_slice($valid['questions'], 0, 9)], $skill, 'intermediate', true, $mix));
+        // التوزيع يتبع الخطة: 6 + 3 مرفوض حتى لو كان المجموع 9
+        $skewed = $valid;
+        $skewed['questions'][5] = ['skill_id' => 10, 'type' => 'coding', 'difficulty' => 'intermediate'] + $skewed['questions'][5];
+        $skewed['questions'][5]['criteria'] = [['skill_id' => 10, 'description' => 'x', 'points' => 5]];
+        $this->assertNull($generator->validate($skewed, $plan, 1));
+        // عدد خاطئ، أو أسئلة مكررة، أو مطابقة حرفيًا لسؤال سابق
+        $this->assertNull($generator->validate(['questions' => array_slice($valid['questions'], 0, 9)], $plan, 1));
         $duplicate = $valid;
         $duplicate['questions'][1]['prompt'] = $duplicate['questions'][0]['prompt'];
-        $this->assertNull($generator->validate($duplicate, $skill, 'intermediate', true, $mix));
-        $previous = [AssessmentQuestionGenerator::fingerprint("  {$valid['questions'][5]['prompt']} ")];
-        $this->assertNull($generator->validate($valid, $skill, 'intermediate', true, $mix, $previous));
+        $this->assertNull($generator->validate($duplicate, $plan, 1));
+        $previous = [AssessmentQuestionGenerator::fingerprint("  {$valid['questions'][9]['prompt']} ")];
+        $this->assertNull($generator->validate($valid, $plan, 1, $previous));
 
         foreach ([
-            ['type' => 'multiple_choice'],
-            ['skill_id' => '10'],
-            ['skill_id' => 11],
-            ['difficulty' => 'advanced'],
-            ['criteria' => []],
-            ['criteria' => [['description' => 'x', 'points' => 0]]],
-            ['criteria' => array_fill(0, 7, ['description' => 'x', 'points' => 1])],
-            ['minimum_evidence' => ''],
-            ['key_concepts' => []],
-            ['prompt' => 'قصير'],
-        ] as $change) {
+            0 => ['type' => 'multiple_choice'],
+            1 => ['skill_id' => '10'],
+            2 => ['skill_id' => 99],
+            3 => ['difficulty' => 'expert'],
+            4 => ['criteria' => []],
+            5 => ['type' => 'coding'],
+            6 => ['difficulty' => 'intermediate'],
+            7 => ['criteria' => [['skill_id' => 10, 'description' => 'x', 'points' => 5]]],
+            8 => ['criteria' => array_fill(0, 7, ['skill_id' => 20, 'description' => 'x', 'points' => 1])],
+            9 => ['criteria' => [['skill_id' => 30, 'description' => 'x', 'points' => 5]]],
+        ] as $index => $change) {
             $broken = $valid;
-            $broken['questions'][0] = $change + $broken['questions'][0];
-            $this->assertNull($generator->validate($broken, $skill, 'intermediate', true, $mix), json_encode($change));
+            $broken['questions'][$index] = $change + $broken['questions'][$index];
+            $this->assertNull($generator->validate($broken, $plan, 1), json_encode([$index, $change]));
+        }
+        foreach ([['minimum_evidence' => ''], ['key_concepts' => []], ['prompt' => 'قصير'], ['criteria' => [['description' => 'x', 'points' => 5]]]] as $change) {
+            $broken = $valid;
+            $broken['questions'][9] = $change + $broken['questions'][9];
+            $this->assertNull($generator->validate($broken, $plan, 1), json_encode($change));
         }
 
-        // تصحيح الأخطاء وتحليل الكود يحتاجان كودًا معطى
+        // تصحيح الأخطاء يحتاج كودًا معطى
         $noContext = $valid;
-        $noContext['questions'][4]['code_context'] = "  \n";
-        $this->assertNull($generator->validate($noContext, $skill, 'intermediate', true, $mix));
+        $noContext['questions'][1]['code_context'] = "  \n";
+        $this->assertNull($generator->validate($noContext, $plan, 1));
+    }
+
+    public function test_multi_skill_outcome_uses_only_each_skills_own_evidence(): void
+    {
+        $service = app(AssessmentSessionService::class);
+        $settings = [
+            'version' => 3,
+            'min_practical_per_skill' => 3,
+            'skill_pass_percentage' => 70,
+            'practical_pass_percentage' => 60,
+            'question_floor_percentage' => 40,
+            'practical_questions_per_weak_allowed' => 3,
+        ];
+        // مهارة 1: 3 أسئلة عملية (10 نقاط)؛ مهارة 2: 3 أسئلة عملية؛ المقال: 40 نقطة للمهارة 1 و 5 للمهارة 2
+        $questions = [
+            ...array_map(fn (int $n): array => ['id' => "q{$n}", 'skill_id' => 1, 'skill_ids' => [1], 'category' => 'practical', 'max_points' => 10], [1, 2, 3]),
+            ...array_map(fn (int $n): array => ['id' => "q{$n}", 'skill_id' => 2, 'skill_ids' => [2], 'category' => 'practical', 'max_points' => 10], [4, 5, 6]),
+            ['id' => 'q7', 'skill_id' => null, 'skill_ids' => [1, 2], 'category' => 'written', 'max_points' => 45, 'rubric' => ['criteria' => [
+                ['id' => 'c1', 'skill_id' => 1, 'points' => 40],
+                ['id' => 'c2', 'skill_id' => 2, 'points' => 5],
+            ]]],
+        ];
+        $answers = function (array $practical, array $essay, string $essayStatus = 'graded') {
+            $items = collect($practical)->mapWithKeys(fn (?int $points, string $id): array => $points === null ? [] : [$id => new AssessmentSessionAnswer([
+                'question_id' => $id, 'grade_status' => 'graded', 'awarded_points' => $points,
+            ])]);
+            $items['q7'] = new AssessmentSessionAnswer(['question_id' => 'q7', 'grade_status' => 'graded', 'awarded_points' => array_sum($essay), 'grade' => [
+                'status' => $essayStatus,
+                'criteria' => [['id' => 'c1', 'skill_id' => 1, 'awarded' => $essay[0]], ['id' => 'c2', 'skill_id' => 2, 'awarded' => $essay[1]]],
+            ]]);
+
+            return $items;
+        };
+
+        // مقال ممتاز (40/40) لا يعوّض عمليًا 50%: المجموع 78% لكن العملي أقل من 60%
+        $set = $answers(['q1' => 5, 'q2' => 5, 'q3' => 5, 'q4' => 10, 'q5' => 10, 'q6' => 10], [40, 0]);
+        $this->assertSame([SkillAssessment::STATUS_FAILED, 78, 'practical_below_threshold'], $service->multiSkillOutcome($questions, $set, $settings, 1));
+        // المهارة 2 لا تأخذ شيئًا من معيار المهارة 1: 30/30 عملي + 0/5 مقال
+        $this->assertSame([SkillAssessment::STATUS_PASSED, 85, 'passed'], $service->multiSkillOutcome($questions, $set, $settings, 2));
+        // إجابة ضعيفة واحدة من ثلاث مسموحة، واثنتان لا
+        $this->assertSame(SkillAssessment::STATUS_PASSED, $service->multiSkillOutcome($questions, $answers(['q1' => 10, 'q2' => 10, 'q3' => 2, 'q4' => 0, 'q5' => 0, 'q6' => 0], [40, 0]), $settings, 1)[0]);
+        $this->assertSame(SkillAssessment::STATUS_FAILED, $service->multiSkillOutcome($questions, $answers(['q1' => 10, 'q2' => 3, 'q3' => 3, 'q4' => 0, 'q5' => 0, 'q6' => 0], [40, 0]), $settings, 1)[0]);
+        // مهارة بتسعة أسئلة: 3 ضعيفة مسموحة، و4 لا، حتى مع مجموع 74% وعملي 68%
+        $nine = [
+            ...array_map(fn (int $n): array => ['id' => "p{$n}", 'skill_id' => 3, 'skill_ids' => [3], 'category' => 'practical', 'max_points' => 10], range(1, 9)),
+            ['id' => 'e', 'skill_id' => null, 'skill_ids' => [3], 'category' => 'written', 'max_points' => 20, 'rubric' => ['criteria' => [['id' => 'c1', 'skill_id' => 3, 'points' => 20]]]],
+        ];
+        $nineAnswers = function (array $points) {
+            $items = collect($points)->mapWithKeys(fn (int $value, int $index): array => ['p'.($index + 1) => new AssessmentSessionAnswer([
+                'question_id' => 'p'.($index + 1), 'grade_status' => 'graded', 'awarded_points' => $value,
+            ])]);
+            $items['e'] = new AssessmentSessionAnswer(['question_id' => 'e', 'grade_status' => 'graded', 'awarded_points' => 20, 'grade' => [
+                'status' => 'graded', 'criteria' => [['id' => 'c1', 'skill_id' => 3, 'awarded' => 20]],
+            ]]);
+
+            return $items;
+        };
+        $this->assertSame([SkillAssessment::STATUS_FAILED, 74, 'weak_answer'], $service->multiSkillOutcome($nine, $nineAnswers([10, 10, 10, 10, 10, 3, 3, 3, 3]), $settings, 3));
+        $this->assertSame(SkillAssessment::STATUS_PASSED, $service->multiSkillOutcome($nine, $nineAnswers([10, 10, 10, 10, 10, 10, 3, 3, 3]), $settings, 3)[0]);
+        // مقال "غير كافٍ" = صفر لكل المهارات مهما كانت درجات معاييره
+        // 30/30 عملي + 0/40 مقال = 42%
+        $this->assertSame(
+            [SkillAssessment::STATUS_FAILED, 42, 'below_threshold'],
+            $service->multiSkillOutcome($questions, $answers(['q1' => 10, 'q2' => 10, 'q3' => 10, 'q4' => 0, 'q5' => 0, 'q6' => 0], [40, 5], 'insufficient_answer'), $settings, 1)
+        );
+        // دليل عملي ناقص (سؤالان فقط) لا ينجح أبدًا
+        $this->assertSame('insufficient_evidence', $service->multiSkillOutcome(array_slice($questions, 1), $answers(['q2' => 10, 'q3' => 10, 'q4' => 10, 'q5' => 10, 'q6' => 10], [40, 5]), $settings, 1)[2]);
+        // تعذر تصحيح المقال يجعل كل مهارة يغطيها غير مكتملة
+        $ungradable = $answers(['q1' => 10, 'q2' => 10, 'q3' => 10, 'q4' => 10, 'q5' => 10, 'q6' => 10], [0, 0]);
+        $ungradable['q7'] = new AssessmentSessionAnswer(['question_id' => 'q7', 'grade_status' => 'ungradable']);
+        $this->assertSame(SkillAssessment::STATUS_INCOMPLETE, $service->multiSkillOutcome($questions, $ungradable, $settings, 2)[0]);
+    }
+
+    private function plan(int $id, string $name, string $level, int $practical, bool $programming = true): array
+    {
+        $skill = new Skill(['name' => $name]);
+        $skill->id = $id;
+
+        return ['skill' => $skill, 'level' => $level, 'programming' => $programming, 'human_verification' => false, 'practical' => $practical];
     }
 
     public function test_multiple_choice_prompts_are_detected(): void

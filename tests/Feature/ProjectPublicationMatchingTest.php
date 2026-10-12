@@ -108,7 +108,7 @@ class ProjectPublicationMatchingTest extends TestCase
             ->assertUnprocessable()
             ->assertJsonPath('message', 'تغيّرت أدوار المقترح أو مهاراته منذ تحميل الصفحة. حدّث الصفحة وأكد مستويات المهارات من جديد.');
         $invalid = $complete;
-        $invalid['role_skill_levels'][0]['level'] = 'expert';
+        $invalid['role_skill_levels'][0]['level'] = 'guru';
         $this->postJson($this->url($projectRequest, 'approve'), $invalid)->assertJsonValidationErrors('role_skill_levels.0.level');
         $this->assertDatabaseCount('project_opportunities', 0);
 
@@ -510,8 +510,8 @@ class ProjectPublicationMatchingTest extends TestCase
             ->assertJsonPath('data.opportunities.0.eligibility.status', OpportunityMatcher::SKILL_NOT_SELECTED);
 
         // REST API مبتدئ (المطلوب) + Laravel مبتدئ (أقل من المطلوب)
-        $this->completeAttempt($rest, 'beginner', 'FULL');
-        $this->completeAttempt($laravel, 'beginner', 'FULL')
+        $this->completeAttempt($rest, 'beginner', 'FULL', 'R1');
+        $this->completeAttempt($laravel, 'beginner', 'FULL', 'L1')
             ->assertJsonPath('data.results.0.status', SkillAssessment::STATUS_PASSED);
         $this->getJson("/api/student/opportunities/{$opportunity->id}")
             ->assertOk()
@@ -519,17 +519,17 @@ class ProjectPublicationMatchingTest extends TestCase
             ->assertJsonPath('data.eligibility.message', 'مستواك المثبت في Laravel هو مبتدئ، بينما يتطلب هذا الدور مستوى متوسطًا.');
 
         // رسوب في المتوسط لا يغيّر شيئًا، ثم النجاح فيه يرفع المستوى ويؤهل للدور
-        $this->completeAttempt($laravel, 'intermediate', 'weak');
+        $this->completeAttempt($laravel, 'intermediate', 'weak', 'L2');
         $this->getJson("/api/student/opportunities/{$opportunity->id}")->assertJsonPath('data.eligibility.status', OpportunityMatcher::LEVEL_INSUFFICIENT);
         $this->travel(25)->hours();
-        $this->completeAttempt($laravel, 'intermediate', 'FULL', 'B');
+        $this->completeAttempt($laravel, 'intermediate', 'FULL', 'L3');
         $this->getJson("/api/student/opportunities/{$opportunity->id}")
             ->assertJsonPath('data.eligibility.status', OpportunityMatcher::ELIGIBLE)
             ->assertJsonPath('data.roles.1.requirements.0.verified_level', 'intermediate');
 
         // رسوب لاحق بمستوى مبتدئ لا يلغي المستوى المتوسط
         $this->travel(25)->hours();
-        $this->completeAttempt($laravel, 'beginner', 'weak', 'C');
+        $this->completeAttempt($laravel, 'beginner', 'weak', 'L4');
         $this->getJson("/api/student/opportunities/{$opportunity->id}")->assertJsonPath('data.eligibility.status', OpportunityMatcher::ELIGIBLE);
 
         // إزالة المهارة من الملف توقف احتسابها فورًا، والفرصة تبقى ظاهرة مع السبب
@@ -539,13 +539,38 @@ class ProjectPublicationMatchingTest extends TestCase
             ->assertJsonPath('data.eligibility.status', OpportunityMatcher::SKILL_NOT_SELECTED);
     }
 
+    public function test_expert_requirements_need_an_expert_pass_and_an_expert_pass_covers_lower_levels(): void
+    {
+        $opportunity = $this->publishedOpportunity(['Laravel' => 'expert', 'REST API' => 'intermediate']);
+        $advanced = $this->student('advanced@example.test', ['Laravel' => 'passed:advanced', 'REST API' => 'passed:expert'], specialization: 'backend_development');
+        $expert = $this->student('expert@example.test', ['Laravel' => 'passed:expert', 'REST API' => 'passed:expert'], specialization: 'backend_development');
+
+        $this->actingAs($advanced, 'sanctum')
+            ->getJson("/api/student/opportunities/{$opportunity->id}")
+            ->assertJsonPath('data.eligibility.status', OpportunityMatcher::LEVEL_INSUFFICIENT)
+            ->assertJsonPath('data.eligibility.message', 'مستواك المثبت في Laravel هو متقدم، بينما يتطلب هذا الدور مستوى خبيرًا.')
+            ->assertJsonPath('data.eligibility.action.level', 'expert')
+            // خبير في REST API يستوفي حد "متوسط"
+            ->assertJsonPath('data.roles.1.requirements.1.met', true);
+        $this->actingAs($expert, 'sanctum')
+            ->getJson("/api/student/opportunities/{$opportunity->id}")
+            ->assertJsonPath('data.eligibility.status', OpportunityMatcher::ELIGIBLE)
+            ->assertJsonPath('data.roles.1.requirements.0.min_level_label', 'خبير');
+
+        // المؤسسة ترى المستوى وعدد المستوفين بالقاعدة نفسها
+        $this->actingAs($opportunity->projectRequest->organization->user, 'sanctum')
+            ->getJson($this->url($opportunity->projectRequest))
+            ->assertJsonPath('data.publication.roles.1.mandatory_requirements.0.min_level', 'expert')
+            ->assertJsonPath('data.publication.roles.1.eligible_students', 1);
+    }
+
     /** محاولة كاملة لمهارة واحدة بمستوى محدد، كما تفعل الواجهة (Gemini وهمي). */
     private function completeAttempt(int $skillId, string $level, string $answer, string $variant = 'A'): TestResponse
     {
         // كل محاولة 12 طلبًا؛ دقيقة بين المحاولات حتى لا يتدخل حد throttle:assessments (30 في الدقيقة)
         $this->travel(61)->seconds();
-        $this->fakeGemini($this->generatedAssessment($skillId, $level, true, $variant));
-        $sessionId = $this->postJson('/api/student/assessment-sessions', ['skill_id' => $skillId, 'level' => $level])->assertCreated()->json('data.id');
+        $this->fakeGemini($this->generatedAssessment([$skillId => $level], $variant));
+        $sessionId = $this->postJson('/api/student/assessment-sessions', ['skills' => [['skill_id' => $skillId, 'level' => $level]]])->assertCreated()->json('data.id');
         foreach (range(1, 10) as $_) {
             $question = $this->getJson("/api/student/assessment-sessions/{$sessionId}")->json('data.current_question.id');
             $this->postJson("/api/student/assessment-sessions/{$sessionId}/answers", ['question_id' => $question, 'answer' => $answer])->assertOk();

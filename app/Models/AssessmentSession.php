@@ -28,6 +28,7 @@ class AssessmentSession extends Model
         'open_slot',
         'title',
         'skill_ids',
+        'skill_levels',
         'questions',
         'question_count',
         'settings',
@@ -47,6 +48,7 @@ class AssessmentSession extends Model
         return [
             'skill_id' => 'integer',
             'skill_ids' => 'array',
+            'skill_levels' => 'array',
             'questions' => 'array',
             'settings' => 'array',
             'generation' => 'array',

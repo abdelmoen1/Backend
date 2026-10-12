@@ -13,7 +13,7 @@ use JsonException;
  */
 class AssessmentGrader
 {
-    public const PROMPT_VERSION = 'free-response-grading-v2';
+    public const PROMPT_VERSION = 'free-response-grading-v3';
 
     public const STATUS_GRADED = 'graded';
 
@@ -23,15 +23,19 @@ class AssessmentGrader
     public function __construct(private readonly AssessmentAiClient $client) {}
 
     /**
-     * @return array{criteria: array<int, array{id: string, awarded: int, max: int, justification: string}>, awarded_points: int, max_points: int, feedback: string, evidence: array<int, string>, missing_concepts: array<int, string>, status: string, prompt_version: string}
+     * $skills: أسماء مهارات السؤال مفهرسة بالمعرّف (مهارة واحدة للسؤال العملي، وقد تكون أكثر للمقال؛ كل معيار في
+     * rubric يحدد skill_id الخاص به).
+     *
+     * @param  array<int, string>  $skills
+     * @return array{criteria: array<int, array{id: string, skill_id: ?int, awarded: int, max: int, justification: string}>, awarded_points: int, max_points: int, feedback: string, evidence: array<int, string>, missing_concepts: array<int, string>, status: string, prompt_version: string}
      */
-    public function grade(array $question, string $skillName, string $answer): array
+    public function grade(array $question, array $skills, string $answer): array
     {
         try {
             $payload = json_encode([
                 'question' => [
                     'id' => $question['id'],
-                    'skill' => $skillName,
+                    'skills' => array_map(fn (int $id, string $name): array => ['skill_id' => $id, 'name' => $name], array_keys($skills), $skills),
                     'format' => $question['format'],
                     // غير موجودين في أسئلة الإصدار السابق
                     'type' => $question['type'] ?? null,
@@ -103,6 +107,8 @@ class AssessmentGrader
                 'id' => $id,
                 'awarded' => $awarded,
                 'max' => $rubric[$id]['points'],
+                // مهارة المعيار من المعايير المحفوظة لا من رد النموذج؛ أسئلة الإصدار السابق بلا مهارة على المعيار
+                'skill_id' => $rubric[$id]['skill_id'] ?? null,
                 'justification' => $this->text($item['justification'] ?? null, 500),
             ];
         }
@@ -154,7 +160,8 @@ class AssessmentGrader
             'لكل معيار في rubric.criteria أعد id نفسه و awarded عددًا صحيحًا من 0 حتى points الخاصة به، دون إضافة معايير أو حذفها.',
             'امنح الدرجة الكاملة للحلول البديلة الصحيحة حتى لو اختلفت عن reference_answer، وميّز الإجابة الجزئية من الكاملة. لا تمنح نقاطًا لشرح واثق لكنه خاطئ تقنيًا. الأخطاء الحرجة في common_mistakes تقلل الدرجة.',
             'لا تخصم بسبب لغة الإجابة (العربية أو الإنجليزية) أو أسلوب الكتابة أو الأخطاء الإملائية ما لم تغيّر المعنى التقني. في أسئلة الكود قيّم صحة المنطق والصياغة الأساسية، ولا تشترط تطابق الأسماء أو التنسيق مع النموذج.',
-            'question.difficulty مستوى التقييم: قيّم بما يناسبه، فلا تشترط في سؤال للمبتدئين عمقًا لم يطلبه، ولا تمنح الدرجة الكاملة في سؤال متقدم لإجابة سطحية.',
+            'question.difficulty مستوى التقييم: قيّم بما يناسبه، فلا تشترط في سؤال للمبتدئين عمقًا لم يطلبه، ولا تمنح الدرجة الكاملة في سؤال متقدم أو خبير لإجابة سطحية.',
+            'كل معيار يحدد skill_id المهارة التي يقيّمها (من question.skills). في السؤال الكتابي الذي يغطي عدة مهارات قيّم كل معيار بما تُظهره الإجابة عن مهارته فقط، ولا تمنح نقاط معيار مهارة لم تتناولها الإجابة.',
             'status = insufficient_answer إذا كانت الإجابة فارغة فعليًا أو خارج الموضوع أو لا تحقق rubric.minimum_evidence إطلاقًا؛ وإلا graded.',
             'evidence: اقتباسات قصيرة حرفية من إجابة الطالب تبرر التقييم. missing_concepts: المفاهيم الأساسية الناقصة أو الخاطئة. feedback: جملتان أو ثلاث بالعربية تشرح التقييم دون نسخ reference_answer.',
             'question_id هو question.id نفسه. لا تقرر النجاح أو الرسوب؛ أعد النقاط فقط. أعد JSON مطابقًا للمخطط فقط.',
