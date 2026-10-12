@@ -7,6 +7,7 @@ use App\Enums\ProjectRequestStatus;
 use App\Models\IntakeSession;
 use App\Models\OrganizationProfile;
 use App\Models\ProjectRequest;
+use App\Models\Skill;
 use App\Models\User;
 use App\Services\AI\ProjectProposalException;
 use Illuminate\Foundation\Testing\RefreshDatabase;
@@ -145,7 +146,8 @@ class ProjectProposalFlowTest extends TestCase
         $generator = \Mockery::mock(ProjectProposalGenerator::class);
         $generator->shouldReceive('generate')
             ->twice()
-            ->andReturn(ProjectProposalFixture::valid());
+            ->andReturn(ProjectProposalFixture::withStaffing());
+        $this->createStaffingSkills();
         $this->app->instance(ProjectProposalGenerator::class, $generator);
 
         $this->postJson("/api/organization/project-requests/{$projectRequestId}/analyze")
@@ -163,9 +165,15 @@ class ProjectProposalFlowTest extends TestCase
             ->assertOk()
             ->assertJsonPath('data.status', ProjectRequestStatus::PROPOSAL_READY);
 
+        // الاعتماد يتطلب تأكيدًا صريحًا للأدوار والمهارات ثم ينشر المشروع
         $this->postJson("/api/organization/project-requests/{$projectRequestId}/approve")
+            ->assertUnprocessable()
+            ->assertJsonValidationErrors('confirm_requirements');
+        $this->postJson("/api/organization/project-requests/{$projectRequestId}/approve", ['confirm_requirements' => true])
             ->assertOk()
-            ->assertJsonPath('data.status', ProjectRequestStatus::APPROVED);
+            ->assertJsonPath('data.status', ProjectRequestStatus::CONVERTED_TO_OPPORTUNITY)
+            ->assertJsonPath('data.publication.status', 'published')
+            ->assertJsonPath('data.publication.version', 1);
     }
 
     public function test_proposal_generation_requires_completed_discovery_and_reuses_existing_proposal(): void
@@ -202,7 +210,8 @@ class ProjectProposalFlowTest extends TestCase
     {
         $organization = $this->organization('review@example.test');
         $projectRequest = $this->completedProject($organization, 'Review project');
-        $proposal = ProjectProposalFixture::valid();
+        $this->createStaffingSkills();
+        $proposal = ProjectProposalFixture::withStaffing();
         $projectRequest->update([
             'proposal' => $proposal,
             'status' => ProjectRequestStatus::PROPOSAL_READY,
@@ -216,25 +225,30 @@ class ProjectProposalFlowTest extends TestCase
             ->assertJsonPath('data.proposal.project_overview.project_name', $proposal['project_overview']['project_name'])
             ->assertJsonPath('data.revision_note', 'يرجى توضيح تكلفة تشغيل النظام.');
 
-        $approved = $this->postJson("/api/organization/project-requests/{$projectRequest->id}/approve")
+        $approved = $this->postJson("/api/organization/project-requests/{$projectRequest->id}/approve", ['confirm_requirements' => true])
             ->assertOk()
-            ->assertJsonPath('data.status', ProjectRequestStatus::APPROVED);
+            ->assertJsonPath('data.status', ProjectRequestStatus::CONVERTED_TO_OPPORTUNITY);
         $approvedAt = $approved->json('data.approved_at');
 
-        $this->postJson("/api/organization/project-requests/{$projectRequest->id}/approve")
-            ->assertUnprocessable();
+        // إعادة الاعتماد (نقرة مكررة أو إعادة محاولة) لا تنشئ نسخة أو فرصة جديدة
+        $this->postJson("/api/organization/project-requests/{$projectRequest->id}/approve", ['confirm_requirements' => true])
+            ->assertOk()
+            ->assertJsonPath('data.publication.version', 1);
 
         $this->assertSame(
             $approvedAt,
             $projectRequest->fresh()->approved_at->toISOString()
         );
-        $this->assertDatabaseHas('project_requests', [
-            'id' => $projectRequest->id,
-            'status' => ProjectRequestStatus::APPROVED,
-        ]);
+        $this->assertSame(1, $projectRequest->proposalVersions()->count());
+        $this->assertDatabaseCount('project_opportunities', 1);
+
+        // التعديل بعد النشر متاح، والنسخة المنشورة تبقى نشطة حتى اعتماد نسخة جديدة
         $this->postJson("/api/organization/project-requests/{$projectRequest->id}/revision", [
             'note' => 'Please make one more change.',
-        ])->assertUnprocessable();
+        ])->assertOk()
+            ->assertJsonPath('data.status', ProjectRequestStatus::REVISION_REQUESTED)
+            ->assertJsonPath('data.publication.status', 'published')
+            ->assertJsonPath('data.publication.version', 1);
     }
 
     public function test_failed_revision_generation_preserves_the_existing_proposal(): void
@@ -285,6 +299,13 @@ class ProjectProposalFlowTest extends TestCase
         ])->assertNotFound();
         $this->postJson("/api/organization/project-requests/{$projectRequest->id}/approve")
             ->assertNotFound();
+    }
+
+    private function createStaffingSkills(): void
+    {
+        foreach (ProjectProposalFixture::STAFFING_SKILLS as $name) {
+            Skill::firstOrCreate(['name' => $name]);
+        }
     }
 
     private function completedProject(User $organization, string $title): ProjectRequest

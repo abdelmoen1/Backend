@@ -18,6 +18,7 @@ class StudentProfile extends Model
         'status',
         'university',
         'academic_major',
+        'professional_specialization',
         'graduation_year',
         'phone',
         'linkedin_url',
@@ -25,6 +26,7 @@ class StudentProfile extends Model
         'image_path',
         'onboarding_completed',
     ];
+
     protected $casts = [
         'onboarding_completed' => 'boolean',
     ];
@@ -37,6 +39,21 @@ class StudentProfile extends Model
     public function studentSkills(): HasMany
     {
         return $this->hasMany(StudentSkill::class);
+    }
+
+    public function skillAssessments(): HasMany
+    {
+        return $this->hasMany(SkillAssessment::class);
+    }
+
+    public function assessmentSessions(): HasMany
+    {
+        return $this->hasMany(AssessmentSession::class);
+    }
+
+    public function skillTestAttempts(): HasMany
+    {
+        return $this->hasMany(SkillTestAttempt::class);
     }
 
     public function profileDetails(): HasOne

@@ -4,6 +4,7 @@ namespace App\Models;
 
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use Illuminate\Database\Eloquent\Relations\HasMany;
 use Illuminate\Database\Eloquent\Relations\HasOne;
 
 class ProjectRequest extends Model
@@ -53,5 +54,15 @@ class ProjectRequest extends Model
     public function intakeSession(): HasOne
     {
         return $this->hasOne(IntakeSession::class);
+    }
+
+    public function opportunity(): HasOne
+    {
+        return $this->hasOne(ProjectOpportunity::class);
+    }
+
+    public function proposalVersions(): HasMany
+    {
+        return $this->hasMany(ProjectProposalVersion::class)->orderBy('version');
     }
 }

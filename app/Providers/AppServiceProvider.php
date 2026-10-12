@@ -36,5 +36,7 @@ class AppServiceProvider extends ServiceProvider
         ));
         RateLimiter::for('register', fn (Request $request) => Limit::perMinute(10)->by($request->ip()));
         RateLimiter::for('oauth', fn (Request $request) => Limit::perMinute(20)->by($request->ip()));
+        // بدء وتسليم اختبارات المهارات لكل طالب
+        RateLimiter::for('assessments', fn (Request $request) => Limit::perMinute(30)->by((string) $request->user()?->id ?: $request->ip()));
     }
 }

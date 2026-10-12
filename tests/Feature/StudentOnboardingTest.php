@@ -28,7 +28,7 @@ class StudentOnboardingTest extends TestCase
             'password' => 'SecurePass123',
             'role' => 'student',
         ]);
-        StudentProfile::create(['user_id' => $student->id]);
+        StudentProfile::create(['user_id' => $student->id, 'professional_specialization' => 'backend_development']);
         StudentProfile::create(['user_id' => $otherStudent->id]);
 
         $this->actingAs($student, 'sanctum')
@@ -46,6 +46,37 @@ class StudentOnboardingTest extends TestCase
             'user_id' => $otherStudent->id,
             'onboarding_completed' => false,
         ]);
+    }
+
+    public function test_onboarding_requires_a_professional_specialization_from_the_catalog(): void
+    {
+        $student = User::create([
+            'name' => 'Student',
+            'email' => 'spec@example.com',
+            'password' => 'SecurePass123',
+            'role' => 'student',
+        ]);
+        StudentProfile::create(['user_id' => $student->id, 'academic_major' => 'علوم الحاسوب']);
+
+        $this->actingAs($student, 'sanctum')
+            ->postJson('/api/student/onboarding/complete')
+            ->assertUnprocessable()
+            ->assertJsonValidationErrors('professional_specialization');
+
+        $this->patchJson('/api/student/onboarding', ['professional_specialization' => 'not-a-track'])
+            ->assertUnprocessable()
+            ->assertJsonValidationErrors('professional_specialization');
+
+        $this->patchJson('/api/student/onboarding', ['professional_specialization' => 'mobile_development'])
+            ->assertOk()
+            ->assertJsonPath('data.professional_specialization', 'mobile_development')
+            ->assertJsonPath('data.professional_specialization_label', 'تطوير تطبيقات الجوال')
+            // التخصص الجامعي بيانات منفصلة تبقى كما هي
+            ->assertJsonPath('data.academic_major', 'علوم الحاسوب');
+
+        $this->postJson('/api/student/onboarding/complete')
+            ->assertOk()
+            ->assertJsonPath('data.onboarding_completed', true);
     }
 
     public function test_me_returns_the_backend_onboarding_state(): void

@@ -6,6 +6,8 @@ use App\Http\Controllers\Api\ProfileImageController;
 use App\Http\Controllers\Api\ProjectDiscoveryController;
 use App\Http\Controllers\Api\ProjectRequestController;
 use App\Http\Controllers\Api\SkillController;
+use App\Http\Controllers\Api\StudentAssessmentController;
+use App\Http\Controllers\Api\StudentOpportunityController;
 use App\Http\Controllers\Api\StudentProfileController;
 use App\Http\Controllers\Api\StudentSkillController;
 use App\Http\Controllers\Auth\GoogleAuthController;
@@ -40,6 +42,20 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::get('/student/onboarding', [StudentProfileController::class, 'show']);
     Route::patch('/student/onboarding', [StudentProfileController::class, 'update']);
     Route::post('/student/onboarding/complete', [StudentProfileController::class, 'completeOnboarding']);
+
+    // تقييم المهارات بأسئلة مفتوحة يولدها Gemini؛ الطالب يرسل نص إجابته فقط والخادم يصحح ويسجل النتائج
+    Route::get('/student/specializations', [StudentAssessmentController::class, 'specializations']);
+    Route::get('/student/assessments', [StudentAssessmentController::class, 'index']);
+    Route::get('/student/assessment-sessions/{session}', [StudentAssessmentController::class, 'show'])->whereNumber('session');
+    Route::middleware('throttle:assessments')->group(function () {
+        Route::post('/student/assessment-sessions', [StudentAssessmentController::class, 'start']);
+        Route::post('/student/assessment-sessions/{session}/answers', [StudentAssessmentController::class, 'answer'])->whereNumber('session');
+        Route::post('/student/assessment-sessions/{session}/finalize', [StudentAssessmentController::class, 'finalize'])->whereNumber('session');
+    });
+
+    // فرص المشاريع: الخادم يعيد فقط المشاريع المنشورة التي يطابق الطالب أحد أدوارها
+    Route::get('/student/opportunities', [StudentOpportunityController::class, 'index']);
+    Route::get('/student/opportunities/{opportunity}', [StudentOpportunityController::class, 'show'])->whereNumber('opportunity');
 
     Route::get('/organization/onboarding', [OrganizationProfileController::class, 'show']);
     Route::patch('/organization/onboarding', [OrganizationProfileController::class, 'update']);

@@ -6,6 +6,7 @@ use App\Contracts\AIProvider;
 use App\Contracts\ProjectProposalGenerator;
 use App\Models\IntakeResponse;
 use App\Models\ProjectRequest;
+use App\Services\Projects\ProjectStaffing;
 use Illuminate\Http\Client\ConnectionException;
 use Illuminate\Support\Facades\Log;
 use JsonException;
@@ -13,6 +14,9 @@ use JsonException;
 class GeminiProjectProposalGenerator implements ProjectProposalGenerator
 {
     public function __construct(private readonly AIProvider $provider) {}
+
+    /** أساس كل متطلب حرج: مؤكد من المؤسسة، توصية بانتظار التأكيد، افتراض، أو غير معروف. */
+    public const REQUIREMENT_BASES = ['confirmed', 'recommendation', 'assumption', 'unknown'];
 
     private const RESPONSE_SCHEMA = [
         'type' => 'OBJECT',
@@ -193,6 +197,11 @@ class GeminiProjectProposalGenerator implements ProjectProposalGenerator
                             'المدة تقدير مبني على النطاق وليست التزامًا؛ إن ذكرت المؤسسة موعدًا فوضّح هل يبدو واقعيًا دون ضمانه.',
                             'risks اختياري: المخاطر والاعتماديات المهمة فقط. payment_schedule اختياري: أدرجه فقط عند وجود تقدير تكلفة، كجدول دفعات مقترح مرتبط بالمراحل، وإلا فاحذفه.',
                             'إذا وُجد revision_request فطبّق التعديل المطلوب على النطاق والمراحل والمدة والتكلفة والتشغيل بما يتسق مع المتطلبات المحدثة، دون أرقام غير مبررة.',
+                            'staffing_requirements هو مصدر الحقيقة لأدوار الفريق: لكل دور اختر category من role_categories، واذكر المسؤوليات وrationale يربطه بميزات محددة في functional_scope. لا تضف دورًا لا يحتاجه النطاق فعلًا (مثل مصمم أو مدير مشروع كعضو مستقل) ولا تخلط بين مسؤولية ومهمة عضو فريق كامل.',
+                            'المهارات الإلزامية والمرغوبة يجب أن تكون من skill_catalog حرفيًا. لا تفرض إطار عمل أو تقنية بعينها (مثل Flutter أو Laravel أو React Native) ما لم تؤكدها المؤسسة أو يفرضها النطاق المؤكد؛ عندها استخدم المهارة الأعم (مثل REST API أو JavaScript) أو اجعل التقنية مرغوبة لا إلزامية.',
+                            'key_requirements: المتطلبات الحرجة للمشروع مع basis: confirmed إذا ذكرتها المؤسسة، recommendation إذا كانت توصية منك بانتظار تأكيدها، assumption إذا كانت افتراضًا، unknown إذا لم تُحسم بعد. لا تقدم توصية أو افتراضًا كحقيقة مؤكدة.',
+                            'لا تختلق حقائق عن المؤسسة أو مواعيد أو أرقام أداء أو توفير مالي أو بيانات متاحة. يمكنك حساب نسبة من أرقام ذكرتها المؤسسة، لكن اعرضها كهدف محتمل مع افتراضاته وليس كنتيجة مضمونة. technical_recommendation توصية مبدئية لم تُعتمد بعد، فصغها كذلك.',
+                            'اذكر في operational_cost والنطاق من سيشغّل النظام بعد التسليم (مثل موظف يحدّث البيانات) دون أن تجعله عضوًا في فريق التطوير. اكتب عناصر القوائم دون ترقيم يدوي في بدايتها.',
                             'أعد جميع أقسام المخطط. اكتب JSON صالحًا مطابقًا للمخطط فقط، دون Markdown أو نص إضافي.',
                         ]),
                     ]],
@@ -203,7 +212,7 @@ class GeminiProjectProposalGenerator implements ProjectProposalGenerator
                 ]],
                 'generationConfig' => [
                     'responseMimeType' => 'application/json',
-                    'responseSchema' => self::RESPONSE_SCHEMA,
+                    'responseSchema' => $this->responseSchema(),
                 ],
             ]);
         } catch (AIProviderConfigurationException) {
@@ -246,6 +255,52 @@ class GeminiProjectProposalGenerator implements ProjectProposalGenerator
         }
 
         return $proposal;
+    }
+
+    /**
+     * المخطط الثابت + أقسام الفريق والمتطلبات الحرجة. أسماء المهارات مقيدة بجدول skills حتى
+     * ترتبط الأدوار بمهارات يمكن التحقق منها لدى الطلاب.
+     */
+    private function responseSchema(): array
+    {
+        $skillNames = array_column(ProjectStaffing::catalog(), 'name');
+        $skillSchema = $skillNames === []
+            ? ['type' => 'STRING']
+            : ['type' => 'STRING', 'enum' => array_values($skillNames)];
+
+        $schema = self::RESPONSE_SCHEMA;
+        $schema['properties']['staffing_requirements'] = [
+            'type' => 'ARRAY',
+            'items' => [
+                'type' => 'OBJECT',
+                'properties' => [
+                    'category' => ['type' => 'STRING', 'enum' => array_keys(ProjectStaffing::ROLE_CATEGORIES)],
+                    'title' => ['type' => 'STRING'],
+                    'responsibilities' => ['type' => 'STRING'],
+                    'rationale' => ['type' => 'STRING'],
+                    'headcount' => ['type' => 'INTEGER'],
+                    'mandatory_skills' => ['type' => 'ARRAY', 'items' => $skillSchema],
+                    'desirable_skills' => ['type' => 'ARRAY', 'items' => $skillSchema],
+                ],
+                'required' => ['category', 'title', 'responsibilities', 'rationale', 'headcount', 'mandatory_skills', 'desirable_skills'],
+            ],
+        ];
+        $schema['properties']['key_requirements'] = [
+            'type' => 'ARRAY',
+            'items' => [
+                'type' => 'OBJECT',
+                'properties' => [
+                    'requirement' => ['type' => 'STRING'],
+                    'basis' => ['type' => 'STRING', 'enum' => self::REQUIREMENT_BASES],
+                    'note' => ['type' => 'STRING'],
+                ],
+                'required' => ['requirement', 'basis', 'note'],
+            ],
+        ];
+        $schema['required'][] = 'staffing_requirements';
+        $schema['required'][] = 'key_requirements';
+
+        return $schema;
     }
 
     private function proposalContext(ProjectRequest $projectRequest): array
@@ -315,6 +370,8 @@ class GeminiProjectProposalGenerator implements ProjectProposalGenerator
             )),
             'unknown_information' => $this->itemsOfKind($requirements, 'unknown'),
             'revision_request' => $projectRequest->revision_note,
+            'skill_catalog' => array_values(array_column(ProjectStaffing::catalog(), 'name')),
+            'role_categories' => ProjectStaffing::ROLE_CATEGORIES,
         ];
     }
 
@@ -447,7 +504,52 @@ class GeminiProjectProposalGenerator implements ProjectProposalGenerator
             unset($proposal['payment_schedule']);
         }
 
+        // الفريق المنظم هو المصدر: قائمة الفريق والمهارات تُشتق منه حتى لا تتعارض
+        $staffing = ProjectStaffing::sanitize($proposal['staffing_requirements'] ?? null);
+        if ($staffing === []) {
+            unset($proposal['staffing_requirements']);
+        } else {
+            $proposal['staffing_requirements'] = $staffing;
+            $proposal['proposed_team'] = array_map(fn (array $role): array => [
+                'role' => $role['title'],
+                'responsibilities' => $role['responsibilities'],
+            ], $staffing);
+            $proposal['required_skills'] = array_values(array_unique(array_merge(
+                ...array_map(fn (array $role): array => array_merge($role['mandatory_skills'], $role['desirable_skills']), $staffing)
+            )));
+        }
+
+        $keyRequirements = $this->keyRequirements($proposal['key_requirements'] ?? null);
+        if ($keyRequirements === []) {
+            unset($proposal['key_requirements']);
+        } else {
+            $proposal['key_requirements'] = $keyRequirements;
+        }
+
         return $proposal;
+    }
+
+    /** @return array<int, array{requirement: string, basis: string, note: string}> */
+    private function keyRequirements(mixed $items): array
+    {
+        if (! is_array($items) || ! array_is_list($items)) {
+            return [];
+        }
+
+        $valid = [];
+        foreach ($items as $item) {
+            $requirement = is_array($item) && is_string($item['requirement'] ?? null) ? trim($item['requirement']) : '';
+            if ($requirement === '' || ! in_array($item['basis'] ?? null, self::REQUIREMENT_BASES, true)) {
+                continue;
+            }
+            $valid[] = [
+                'requirement' => mb_substr($requirement, 0, 1000),
+                'basis' => $item['basis'],
+                'note' => is_string($item['note'] ?? null) ? mb_substr(trim($item['note']), 0, 1000) : '',
+            ];
+        }
+
+        return array_slice($valid, 0, 30);
     }
 
     private function validPaymentSchedule(mixed $items): bool

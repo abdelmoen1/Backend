@@ -4,6 +4,37 @@ namespace Tests\Support;
 
 class ProjectProposalFixture
 {
+    /** المهارات التي تشير إليها متطلبات الفريق في withStaffing؛ تُنشأ في الاختبار قبل الاعتماد. */
+    public const STAFFING_SKILLS = ['Flutter', 'Dart', 'Laravel', 'PHP', 'MySQL', 'REST API', 'Git'];
+
+    /** مقترح صالح للنشر: دوران منظمان (جوال وخلفية) بمهارات من قائمة المنصة. */
+    public static function withStaffing(): array
+    {
+        $proposal = self::valid();
+        $proposal['staffing_requirements'] = [
+            [
+                'category' => 'mobile_developer',
+                'title' => 'مطوّر تطبيق الجوال',
+                'responsibilities' => 'بناء تطبيق الركاب لعرض المسارات والأجرة.',
+                'rationale' => 'ميزة عرض المسارات للركاب تتطلب تطبيق جوال.',
+                'headcount' => 1,
+                'mandatory_skills' => ['Flutter', 'Dart'],
+                'desirable_skills' => ['Git'],
+            ],
+            [
+                'category' => 'backend_developer',
+                'title' => 'مطوّر الخدمات الخلفية',
+                'responsibilities' => 'بناء واجهات البيانات وإدارة المسارات والأسعار.',
+                'rationale' => 'تحديث بيانات المسارات مركزيًا يتطلب خدمة خلفية.',
+                'headcount' => 1,
+                'mandatory_skills' => ['Laravel', 'REST API'],
+                'desirable_skills' => ['MySQL'],
+            ],
+        ];
+
+        return $proposal;
+    }
+
     public static function valid(): array
     {
         return [

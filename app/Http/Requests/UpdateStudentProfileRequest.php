@@ -2,6 +2,7 @@
 
 namespace App\Http\Requests;
 
+use App\Services\Projects\SpecializationRoles;
 use Illuminate\Foundation\Http\FormRequest;
 use Illuminate\Validation\Rule;
 
@@ -50,6 +51,13 @@ class UpdateStudentProfileRequest extends FormRequest
                 'nullable',
                 'string',
                 'max:255',
+            ],
+
+            // المسار المهني من القائمة التي يديرها الخادم (config/matching.php)
+            'professional_specialization' => [
+                'sometimes',
+                'nullable',
+                Rule::in(SpecializationRoles::keys()),
             ],
 
             'graduation_year' => [

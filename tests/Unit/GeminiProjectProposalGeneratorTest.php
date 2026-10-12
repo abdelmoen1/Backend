@@ -6,6 +6,7 @@ use App\Models\IntakeResponse;
 use App\Models\IntakeSession;
 use App\Models\OrganizationProfile;
 use App\Models\ProjectRequest;
+use App\Models\Skill;
 use App\Models\User;
 use App\Services\AI\GeminiProjectProposalGenerator;
 use App\Services\AI\ProjectProposalException;
@@ -47,6 +48,44 @@ class GeminiProjectProposalGeneratorTest extends TestCase
                 && ! isset($body['generationConfig']['responseFormat'])
                 && $context['organization']['type'] === 'عيادة'
                 && $context['discovery_answers'][0]['custom_answer'] === 'تذكير المرضى عبر الرسائل';
+        });
+    }
+
+    public function test_staffing_is_constrained_to_platform_skills_and_drives_team_and_skill_lists(): void
+    {
+        config(['services.gemini.api_key' => 'test-key']);
+        foreach (ProjectProposalFixture::STAFFING_SKILLS as $name) {
+            Skill::create(['name' => $name]);
+        }
+        $request = $this->projectRequestWithDiscovery();
+        $output = ProjectProposalFixture::withStaffing();
+        $output['staffing_requirements'][] = ['category' => 'unknown_role', 'title' => '', 'responsibilities' => 'x'];
+        $output['key_requirements'] = [
+            ['requirement' => 'عرض الأجرة لكل مسار', 'basis' => 'confirmed', 'note' => 'ذكرتها المؤسسة'],
+            ['requirement' => 'تقليل تكلفة التنقل 50%', 'basis' => 'guaranteed', 'note' => ''],
+            ['requirement' => 'تطبيق جوال للركاب', 'basis' => 'recommendation', 'note' => 'بانتظار التأكيد'],
+        ];
+        Http::fake(['*' => Http::response($this->geminiResponse($output))]);
+
+        $proposal = app(GeminiProjectProposalGenerator::class)->generate($request);
+
+        // الدور غير الصالح يُحذف، والفريق والمهارات تُشتق من الأدوار المنظمة فلا تتعارض
+        $this->assertCount(2, $proposal['staffing_requirements']);
+        $this->assertSame(['مطوّر تطبيق الجوال', 'مطوّر الخدمات الخلفية'], array_column($proposal['proposed_team'], 'role'));
+        $this->assertSame(['Flutter', 'Dart', 'Git', 'Laravel', 'REST API', 'MySQL'], $proposal['required_skills']);
+        // الأساس غير المعروف يُستبعد ولا يُعرض كحقيقة
+        $this->assertSame(['confirmed', 'recommendation'], array_column($proposal['key_requirements'], 'basis'));
+
+        Http::assertSent(function (Request $sent): bool {
+            $schema = $sent->data()['generationConfig']['responseSchema'];
+            $context = json_decode($sent->data()['contents'][0]['parts'][0]['text'], true);
+            $skills = $schema['properties']['staffing_requirements']['items']['properties']['mandatory_skills']['items']['enum'];
+
+            return in_array('Laravel', $skills, true)
+                && ! in_array('React Native', $skills, true)
+                && in_array('staffing_requirements', $schema['required'], true)
+                && in_array('Flutter', $context['skill_catalog'], true)
+                && isset($context['role_categories']['mobile_developer']);
         });
     }
 

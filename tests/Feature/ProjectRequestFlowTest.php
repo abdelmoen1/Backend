@@ -6,6 +6,7 @@ use App\Contracts\ProjectProposalGenerator;
 use App\Enums\ProjectRequestStatus;
 use App\Models\IntakeSession;
 use App\Models\OrganizationProfile;
+use App\Models\Skill;
 use App\Models\User;
 use Database\Seeders\ProjectRequestDemoSeeder;
 use Illuminate\Foundation\Testing\RefreshDatabase;
@@ -148,7 +149,10 @@ class ProjectRequestFlowTest extends TestCase
         $generator = \Mockery::mock(ProjectProposalGenerator::class);
         $generator->shouldReceive('generate')
             ->once()
-            ->andReturn(ProjectProposalFixture::valid());
+            ->andReturn(ProjectProposalFixture::withStaffing());
+        foreach (ProjectProposalFixture::STAFFING_SKILLS as $name) {
+            Skill::firstOrCreate(['name' => $name]);
+        }
         $this->app->instance(ProjectProposalGenerator::class, $generator);
 
         $this->postJson("/api/organization/project-requests/{$projectRequest->id}/analyze")
@@ -157,13 +161,13 @@ class ProjectRequestFlowTest extends TestCase
             ->assertJsonPath('data.proposal.project_overview.project_name', 'نظام إدارة مواعيد العيادة')
             ->assertJsonPath('data.proposal.estimated_cost', 'تقدير مبدئي: يحدد بعد اعتماد النطاق');
 
-        $this->postJson("/api/organization/project-requests/{$projectRequest->id}/approve")
+        $this->postJson("/api/organization/project-requests/{$projectRequest->id}/approve", ['confirm_requirements' => true])
             ->assertOk()
-            ->assertJsonPath('data.status', ProjectRequestStatus::APPROVED);
+            ->assertJsonPath('data.status', ProjectRequestStatus::CONVERTED_TO_OPPORTUNITY);
 
         $this->assertDatabaseHas('project_requests', [
             'id' => $projectRequest->id,
-            'status' => ProjectRequestStatus::APPROVED,
+            'status' => ProjectRequestStatus::CONVERTED_TO_OPPORTUNITY,
         ]);
     }
 

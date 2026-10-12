@@ -165,23 +165,44 @@ final class DiscoveryRequirements
         );
         $facts = array_filter($active, fn (array $item): bool => $item['kind'] === 'fact');
         $hasUnknown = array_filter($active, fn (array $item): bool => $item['kind'] === 'unknown') !== [];
+        $hasContradiction = array_filter($active, fn (array $item): bool => $item['kind'] === 'contradiction') !== [];
 
-        if ($coverage === 'not_applicable') {
+        // التغطية تُحسب من الأدلة المحفوظة فقط: تقييم Gemini وحده لا يجعل المحور مغطى.
+        // الحقائق المذكورة صراحة دليل، و"غير معروف" دليل فقط إذا صرحت به المؤسسة (بند unknown).
+        if ($facts !== []) {
+            return $coverage === 'sufficient' && ! $hasContradiction ? 'sufficient' : 'partial';
+        }
+        if ($hasUnknown) {
+            return 'unknown';
+        }
+        if ($coverage === 'not_applicable' && ! in_array($area, self::CORE_AREAS, true)) {
             return 'not_applicable';
         }
-        if ($facts === []) {
-            return $hasUnknown || $coverage === 'unknown' ? 'unknown' : 'missing';
-        }
 
-        return $coverage === 'sufficient' ? 'sufficient' : 'partial';
+        return 'missing';
     }
 
-    /** المحاور الأساسية التي لا يوجد عنها أي معلومة ولا تصريح بأنها غير معروفة. */
+    /**
+     * المحاور الأساسية التي تمنع إعداد المقترح: محور بلا دليل، أو محور "غير معروف" (العملية الحالية
+     * وحدها يمكن أن تبقى غير معروفة)، أو محور فيه تعارض لم يُحسم.
+     */
     public static function missingCoreAreas(array $requirements): array
     {
+        $active = self::activeItems($requirements);
+
         return array_values(array_filter(
             self::CORE_AREAS,
-            fn (string $area): bool => self::areaStatus($requirements, $area) === 'missing'
+            function (string $area) use ($requirements, $active): bool {
+                $status = self::areaStatus($requirements, $area);
+                $contradiction = array_filter(
+                    $active,
+                    fn (array $item): bool => $item['area'] === $area && $item['kind'] === 'contradiction'
+                ) !== [];
+
+                return $status === 'missing'
+                    || ($status === 'unknown' && $area !== 'current_process')
+                    || $contradiction;
+            }
         ));
     }
 
@@ -231,7 +252,8 @@ final class DiscoveryRequirements
 
         foreach (self::AREAS as $area => $label) {
             $status = self::areaStatus($requirements, $area);
-            if ($status !== 'missing') {
+            // "مفهوم" يعني وجود دليل من المؤسسة؛ ادعاء "لا ينطبق" دون دليل لا يُحتسب
+            if (in_array($status, ['sufficient', 'partial', 'unknown'], true)) {
                 $covered++;
             }
 

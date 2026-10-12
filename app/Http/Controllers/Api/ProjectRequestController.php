@@ -13,6 +13,8 @@ use App\Models\IntakeSession;
 use App\Models\ProjectRequest;
 use App\Services\AI\DiscoveryRequirements;
 use App\Services\AI\ProjectProposalException;
+use App\Services\Projects\ProposalApprovalException;
+use App\Services\Projects\ProposalPublisher;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
@@ -118,7 +120,8 @@ class ProjectRequestController extends Controller
         }
 
         $record = $this->ownedRequest($request, $projectRequest);
-        if ($record->status === ProjectRequestStatus::CONVERTED_TO_OPPORTUNITY) {
+        // الطلب المنشور (ولو كان قيد التعديل) يحتفظ بالنسخ المعتمدة والفرصة المرتبطة به
+        if ($record->status === ProjectRequestStatus::CONVERTED_TO_OPPORTUNITY || $record->opportunity()->exists()) {
             return response()->json([
                 'success' => false,
                 'message' => 'لا يمكن حذف طلب تحول إلى فرصة.',
@@ -151,9 +154,10 @@ class ProjectRequestController extends Controller
             ], 422);
         }
 
+        // المقترح المنشور لا يُعاد توليده إلا بعد طلب تعديل صريح من المؤسسة
         if (
             $record->proposal
-            && $record->status === ProjectRequestStatus::PROPOSAL_READY
+            && in_array($record->status, [ProjectRequestStatus::PROPOSAL_READY, ProjectRequestStatus::CONVERTED_TO_OPPORTUNITY], true)
         ) {
             return response()->json([
                 'success' => true,
@@ -227,50 +231,33 @@ class ProjectRequestController extends Controller
         ]);
     }
 
-    public function approve(Request $request, int $projectRequest): JsonResponse
-    {
+    public function approve(
+        Request $request,
+        int $projectRequest,
+        ProposalPublisher $publisher
+    ): JsonResponse {
         if ($response = $this->organizationOnly($request)) {
             return $response;
         }
 
         $record = $this->ownedRequest($request, $projectRequest);
-        if (! $record->proposal || ! in_array($record->status, [
-            ProjectRequestStatus::PROPOSAL_READY,
-            ProjectRequestStatus::REVISION_REQUESTED,
-        ], true)) {
+        // الأدوار والمهارات يقترحها الذكاء الاصطناعي؛ لا تُنشر قبل أن تؤكدها المؤسسة صراحة
+        $request->validate([
+            'confirm_requirements' => ['accepted'],
+        ], [
+            'confirm_requirements.accepted' => 'يرجى تأكيد مراجعة الأدوار والمهارات المطلوبة قبل اعتماد المقترح.',
+        ]);
+
+        try {
+            $publisher->approve($record, $request->user());
+        } catch (ProposalApprovalException $exception) {
             return response()->json([
                 'success' => false,
-                'message' => 'لا يوجد مقترح جاهز للاعتماد.',
+                'message' => $exception->getMessage(),
             ], 422);
         }
 
-        $record = DB::transaction(function () use ($record): ProjectRequest {
-            $locked = ProjectRequest::query()
-                ->whereKey($record->id)
-                ->lockForUpdate()
-                ->firstOrFail();
-
-            if ($locked->status === ProjectRequestStatus::APPROVED) {
-                abort(422, 'تم اعتماد هذا المقترح بالفعل.');
-            }
-            if (! $locked->proposal || ! in_array($locked->status, [
-                ProjectRequestStatus::PROPOSAL_READY,
-                ProjectRequestStatus::REVISION_REQUESTED,
-            ], true)) {
-                abort(422, 'لا يوجد مقترح جاهز للاعتماد.');
-            }
-
-            $locked->status = ProjectRequestStatus::APPROVED;
-            $locked->approved_at = now();
-            $locked->save();
-
-            return $locked->fresh();
-        });
-
-        return response()->json([
-            'success' => true,
-            'data' => new ProjectRequestResource($record),
-        ]);
+        return $this->projectRequestResponse($request, $projectRequest);
     }
 
     public function revision(
@@ -284,11 +271,8 @@ class ProjectRequestController extends Controller
                 'message' => 'لا يوجد مقترح لمراجعته بعد.',
             ], 422);
         }
-        if (in_array($record->status, [
-            ProjectRequestStatus::APPROVED,
-            ProjectRequestStatus::CONVERTED_TO_OPPORTUNITY,
-            ProjectRequestStatus::REJECTED,
-        ], true)) {
+        // بعد النشر يبقى التعديل متاحًا: النسخة المعتمدة تظل منشورة حتى تعتمد المؤسسة النسخة الجديدة
+        if ($record->status === ProjectRequestStatus::REJECTED) {
             return response()->json([
                 'success' => false,
                 'message' => 'لا يمكن طلب تعديل لمقترح تم إغلاقه.',
@@ -379,11 +363,13 @@ class ProjectRequestController extends Controller
         Request $request,
         int $projectRequest
     ): JsonResponse {
+        $record = $this->ownedRequest($request, $projectRequest);
+        // صفحة الطلب تعرض حالة النشر وعدد الطلاب المؤهلين لكل دور
+        $record->load('opportunity.activeVersion.roles.skills.skill');
+
         return response()->json([
             'success' => true,
-            'data' => new ProjectRequestResource(
-                $this->ownedRequest($request, $projectRequest)
-            ),
+            'data' => new ProjectRequestResource($record),
         ]);
     }
 

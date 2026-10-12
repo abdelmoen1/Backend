@@ -5,6 +5,7 @@ namespace App\Http\Controllers\Api;
 use App\Http\Controllers\Controller;
 use App\Http\Requests\UpdateStudentProfileRequest;
 use App\Http\Resources\StudentProfileResource;
+use App\Services\Projects\SpecializationRoles;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
@@ -140,6 +141,15 @@ class StudentProfileController extends Controller
                 'success' => false,
                 'message' => 'Student profile not found.',
             ], 404);
+        }
+
+        // المسار المهني إلزامي: عليه تُبنى التقييمات ومطابقة أدوار المشاريع
+        if (SpecializationRoles::for($studentProfile->professional_specialization)['status'] !== SpecializationRoles::COMPATIBLE) {
+            return response()->json([
+                'success' => false,
+                'message' => 'اختر مسارك المهني لإكمال ملفك.',
+                'errors' => ['professional_specialization' => ['اختر مسارك المهني لإكمال ملفك.']],
+            ], 422);
         }
 
         $studentProfile->update([

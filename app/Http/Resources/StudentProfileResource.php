@@ -2,6 +2,7 @@
 
 namespace App\Http\Resources;
 
+use App\Services\Projects\SpecializationRoles;
 use Illuminate\Http\Request;
 use Illuminate\Http\Resources\Json\JsonResource;
 
@@ -20,6 +21,8 @@ class StudentProfileResource extends JsonResource
 
             'university' => $this->university,
             'academic_major' => $this->academic_major,
+            'professional_specialization' => $this->professional_specialization,
+            'professional_specialization_label' => SpecializationRoles::for($this->professional_specialization)['label'],
             'graduation_year' => $this->graduation_year,
             'phone' => $this->phone,
             'linkedin_url' => $this->linkedin_url,
