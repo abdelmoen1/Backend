@@ -49,6 +49,9 @@ class AssessmentQuestionGenerator
         SkillLevels::EXPERT => 'expert: مشكلات مفتوحة على مستوى الإنتاج: تصميم أنظمة تتحمل الحمل والأعطال، تحسين أداء مقيس، أمان متقدم، تشخيص أعطال معقدة من أعراض جزئية، ومقايضات يبررها خبير مع حدود كل حل.',
     ];
 
+    /** @var array{reason: string, question?: int}|null سبب آخر رفض في validate() برمز ثابت للسجل، دون أي نص من الرد */
+    private ?array $rejection = null;
+
     public function __construct(private readonly AssessmentAiClient $client) {}
 
     /**
@@ -120,6 +123,7 @@ class AssessmentQuestionGenerator
                 'provider' => 'gemini',
                 'attempt' => $attempt,
                 'max_attempts' => $attempts,
+                ...($this->rejection ?? ['reason' => 'unknown']),
             ]);
         }
 
@@ -134,11 +138,12 @@ class AssessmentQuestionGenerator
      */
     public function validate(mixed $data, array $plan, int $written, array $previousFingerprints = []): ?array
     {
+        $this->rejection = null;
         if (! is_array($data) || ! is_array($data['questions'] ?? null) || ! array_is_list($data['questions'])) {
-            return null;
+            return $this->reject('not_a_question_list');
         }
         if (count($data['questions']) !== array_sum(array_column($plan, 'practical')) + $written) {
-            return null;
+            return $this->reject('question_count');
         }
 
         $bySkill = [];
@@ -148,15 +153,20 @@ class AssessmentQuestionGenerator
         $writtenQuestions = [];
         $seen = [];
 
-        foreach ($data['questions'] as $item) {
+        foreach ($data['questions'] as $index => $item) {
             $question = $this->question($item, $bySkill);
             if ($question === null) {
+                $this->rejection['question'] = $index + 1;
+
                 return null;
             }
             // لا يتكرر السؤال داخل الجلسة، ولا يطابق حرفيًا سؤالًا سبق أن طُرح على الطالب
             $fingerprint = self::fingerprint($question['prompt']);
-            if (in_array($fingerprint, $seen, true) || in_array($fingerprint, $previousFingerprints, true)) {
-                return null;
+            if (in_array($fingerprint, $seen, true)) {
+                return $this->reject('duplicate_prompt', $index + 1);
+            }
+            if (in_array($fingerprint, $previousFingerprints, true)) {
+                return $this->reject('repeats_previous_question', $index + 1);
             }
             $seen[] = $fingerprint;
 
@@ -169,11 +179,11 @@ class AssessmentQuestionGenerator
 
         // التغطية الفعلية: لكل مهارة عدد أسئلتها العملية المخطط بالضبط، والسؤال الكتابي بالعدد المطلوب
         if (count($writtenQuestions) !== $written) {
-            return null;
+            return $this->reject('written_count');
         }
         foreach ($bySkill as $entry) {
             if (count($entry['questions']) !== $entry['plan']['practical']) {
-                return null;
+                return $this->reject('practical_count_per_skill');
             }
         }
 
@@ -213,7 +223,7 @@ class AssessmentQuestionGenerator
     private function question(mixed $item, array $bySkill): ?array
     {
         if (! is_array($item)) {
-            return null;
+            return $this->reject('not_an_object');
         }
 
         $type = is_string($item['type'] ?? null) ? $item['type'] : '';
@@ -225,12 +235,18 @@ class AssessmentQuestionGenerator
         $concepts = $this->stringList($item['key_concepts'] ?? null, 10, 300);
         $mistakes = $this->stringList($item['common_mistakes'] ?? [], 8, 300);
 
-        if (mb_strlen($prompt) < 15
-            || mb_strlen($codeContext) > 4000
-            || $reference === '' || $minimum === ''
-            || $concepts === null || $concepts === [] || $mistakes === null
-            || self::looksLikeMultipleChoice($prompt)) {
-            return null;
+        $invalid = match (true) {
+            mb_strlen($prompt) < 15 => 'prompt_too_short',
+            mb_strlen($codeContext) > 4000 => 'code_context_too_long',
+            $reference === '' => 'missing_reference_answer',
+            $minimum === '' => 'missing_minimum_evidence',
+            $concepts === null || $concepts === [] => 'missing_key_concepts',
+            $mistakes === null => 'invalid_common_mistakes',
+            self::looksLikeMultipleChoice($prompt) => 'multiple_choice',
+            default => null,
+        };
+        if ($invalid !== null) {
+            return $this->reject($invalid);
         }
 
         $selected = array_keys($bySkill);
@@ -248,11 +264,15 @@ class AssessmentQuestionGenerator
         // سؤال عملي: لمهارة مختارة واحدة، بمستواها بالضبط، وبنوع يناسبها (كود للبرمجية، مهام لغيرها)
         $skillId = $item['skill_id'] ?? null;
         $entry = is_int($skillId) ? ($bySkill[$skillId] ?? null) : null;
-        if ($entry === null
-            || self::categoryOf($type, $entry['plan']['programming']) !== self::CATEGORY_PRACTICAL
-            || ($item['difficulty'] ?? null) !== $entry['plan']['level']
-            || (in_array($type, self::CONTEXT_TYPES, true) && trim($codeContext) === '')) {
-            return null;
+        $invalid = match (true) {
+            $entry === null => 'unknown_skill',
+            self::categoryOf($type, $entry['plan']['programming']) !== self::CATEGORY_PRACTICAL => 'type_not_allowed_for_skill',
+            ($item['difficulty'] ?? null) !== $entry['plan']['level'] => 'difficulty_mismatch',
+            in_array($type, self::CONTEXT_TYPES, true) && trim($codeContext) === '' => 'missing_code_context',
+            default => null,
+        };
+        if ($invalid !== null) {
+            return $this->reject($invalid);
         }
         $criteria = $this->criteria($item['criteria'] ?? null, $selected, $skillId);
         if ($criteria === null) {
@@ -309,7 +329,7 @@ class AssessmentQuestionGenerator
     private function criteria(mixed $items, array $selected, ?int $questionSkill): ?array
     {
         if (! is_array($items) || ! array_is_list($items) || $items === [] || count($items) > self::MAX_CRITERIA) {
-            return null;
+            return $this->reject('criteria_count');
         }
 
         $criteria = [];
@@ -318,22 +338,29 @@ class AssessmentQuestionGenerator
             $points = is_array($item) ? ($item['points'] ?? null) : null;
             $skillId = is_array($item) ? ($item['skill_id'] ?? null) : null;
             if ($description === '' || ! is_int($points) || $points < 1 || $points > self::MAX_CRITERION_POINTS) {
-                return null;
+                return $this->reject('invalid_criterion');
             }
             if ($questionSkill !== null) {
                 // معيار سؤال عملي لا يقيّم مهارة أخرى
                 if ($skillId !== null && $skillId !== $questionSkill) {
-                    return null;
+                    return $this->reject('criterion_skill_mismatch');
                 }
                 $skillId = $questionSkill;
             } elseif (! is_int($skillId) || ! in_array($skillId, $selected, true)) {
-                return null;
+                return $this->reject('essay_criterion_skill_invalid');
             }
             // معرّفات المعايير يحددها الخادم حتى لا تعتمد مطابقة التصحيح على نص يولده النموذج
             $criteria[] = ['id' => 'c'.($index + 1), 'skill_id' => $skillId, 'description' => $description, 'points' => $points];
         }
 
         return $criteria;
+    }
+
+    private function reject(string $reason, ?int $question = null): null
+    {
+        $this->rejection = ['reason' => $reason] + ($question !== null ? ['question' => $question] : []);
+
+        return null;
     }
 
     /** صيغة اختيار من متعدد ممنوعة: خيارات مرقمة بالحروف أو طلب "اختر الإجابة". */

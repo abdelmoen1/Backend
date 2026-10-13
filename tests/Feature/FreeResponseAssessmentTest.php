@@ -231,9 +231,33 @@ class FreeResponseAssessmentTest extends TestCase
             'missing rubric' => fn (): array => $this->withQuestion($valid(), 0, ['reference_answer' => '']),
             'nine questions' => fn (): array => ['title' => 'x', 'questions' => array_slice($valid()['questions'], 0, 9)],
         ];
+        // سبب الرفض في السجل رمز ثابت مع رقم السؤال، دون نص السؤال أو المعايير
+        $reasons = [
+            'multiple choice' => ['multiple_choice', 1],
+            'unselected skill' => ['unknown_skill', 2],
+            'uneven coverage' => ['criterion_skill_mismatch', 5],
+            'wrong level for skill' => ['difficulty_mismatch', 1],
+            'two essays' => ['written_count', null],
+            'no essay' => ['criterion_skill_mismatch', 10],
+            'essay criterion for unselected skill' => ['essay_criterion_skill_invalid', 10],
+            'essay criterion without skill' => ['essay_criterion_skill_invalid', 10],
+            'practical criterion for another skill' => ['criterion_skill_mismatch', 1],
+            'debugging without code' => ['missing_code_context', 2],
+            'non-programming type' => ['type_not_allowed_for_skill', 1],
+            'points out of range' => ['invalid_criterion', 1],
+            'missing rubric' => ['missing_reference_answer', 1],
+            'nine questions' => ['question_count', null],
+        ];
         $student = $this->student('malformed@example.test');
+        $logged = [];
+        Log::listen(function ($entry) use (&$logged): void {
+            if ($entry->message === 'Gemini assessment generation failed validation.') {
+                $logged[] = $entry->context;
+            }
+        });
 
         foreach ($invalid as $label => $build) {
+            $logged = [];
             $this->fakeGemini(fn (): array => $build());
             $this->actingAs($student, 'sanctum')
                 ->postJson('/api/student/assessment-sessions', $this->payload($levels))
@@ -241,6 +265,11 @@ class FreeResponseAssessmentTest extends TestCase
                 ->assertJsonPath('code', 'ai_invalid_response')
                 ->assertJsonPath('retryable', true);
             $this->assertCount(2, $this->geminiRequestsOf('generation'), "Generation retries are bounded ({$label}).");
+            [$reason, $question] = $reasons[$label];
+            $this->assertCount(2, $logged, $label);
+            $this->assertSame($reason, $logged[0]['reason'], $label);
+            $this->assertSame($question, $logged[0]['question'] ?? null, $label);
+            $this->assertStringNotContainsString('الخيار', json_encode($logged, JSON_UNESCAPED_UNICODE));
         }
 
         $this->fakeGemini(fn () => Http::response(['error' => ['code' => 503, 'status' => 'UNAVAILABLE']], 503));
