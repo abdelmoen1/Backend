@@ -44,13 +44,16 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::post('/student/onboarding/complete', [StudentProfileController::class, 'completeOnboarding']);
 
     // تقييم المهارات بأسئلة مفتوحة يولدها Gemini؛ الطالب يرسل نص إجابته فقط والخادم يصحح ويسجل النتائج
-    Route::get('/student/specializations', [StudentAssessmentController::class, 'specializations']);
-    Route::get('/student/assessments', [StudentAssessmentController::class, 'index']);
-    Route::get('/student/assessment-sessions/{session}', [StudentAssessmentController::class, 'show'])->whereNumber('session');
-    Route::middleware('throttle:assessments')->group(function () {
-        Route::post('/student/assessment-sessions', [StudentAssessmentController::class, 'start']);
-        Route::post('/student/assessment-sessions/{session}/answers', [StudentAssessmentController::class, 'answer'])->whereNumber('session');
-        Route::post('/student/assessment-sessions/{session}/finalize', [StudentAssessmentController::class, 'finalize'])->whereNumber('session');
+    // X-Request-Id في كل رد يربط ما يظهر في أدوات المطور بسطر السجل المقابل
+    Route::middleware(AssignRequestId::class)->group(function () {
+        Route::get('/student/specializations', [StudentAssessmentController::class, 'specializations']);
+        Route::get('/student/assessments', [StudentAssessmentController::class, 'index']);
+        Route::get('/student/assessment-sessions/{session}', [StudentAssessmentController::class, 'show'])->whereNumber('session');
+        Route::middleware('throttle:assessments')->group(function () {
+            Route::post('/student/assessment-sessions', [StudentAssessmentController::class, 'start']);
+            Route::post('/student/assessment-sessions/{session}/answers', [StudentAssessmentController::class, 'answer'])->whereNumber('session');
+            Route::post('/student/assessment-sessions/{session}/finalize', [StudentAssessmentController::class, 'finalize'])->whereNumber('session');
+        });
     });
 
     // فرص المشاريع: الخادم يعيد فقط المشاريع المنشورة التي يطابق الطالب أحد أدوارها

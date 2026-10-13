@@ -8,11 +8,13 @@ use App\Models\Skill;
 use App\Models\SkillAssessment;
 use App\Models\StudentProfile;
 use App\Services\Projects\SpecializationRoles;
+use Illuminate\Database\QueryException;
 use Illuminate\Database\UniqueConstraintViolationException;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
 
 /**
  * جلسات التقييم المكتوب، كل جلسة لحتى 3 مهارات بمستوى يختاره الطالب لكل مهارة:
@@ -101,6 +103,16 @@ class AssessmentSessionService
             return [$open, false];
         }
 
+        $schemaProblems = AssessmentSchema::problems();
+        if ($schemaProblems !== []) {
+            Log::critical('Assessment start blocked: database schema is behind the deployed code. Run pending migrations.', [
+                'stage' => 'schema',
+                'problems' => $schemaProblems,
+            ]);
+
+            throw new AssessmentException('التقييم غير متاح مؤقتًا بسبب تحديث في الخادم. لم يُسجَّل أي شيء؛ حاول لاحقًا.', 'assessment_unavailable', 503);
+        }
+
         $specialization = SpecializationRoles::for($student->professional_specialization);
         if ($specialization['status'] !== SpecializationRoles::COMPATIBLE) {
             throw new AssessmentException('اختر مسارك المهني أولًا ليُبنى التقييم عليه.', 'specialization_required', 422);
@@ -171,6 +183,8 @@ class AssessmentSessionService
             throw new AssessmentException('يجري إعداد تقييمك الآن. انتظر قليلًا ثم حدّث الصفحة.', 'session_starting', 409, retryable: true);
         }
 
+        // مرحلة الطلب الحالية لسطر السجل عند فشل قاعدة البيانات
+        $stage = 'prepare';
         try {
             $minutes = self::timeLimitMinutes();
             $nonProgramming = SkillVerification::nonProgrammingSkillIds();
@@ -188,6 +202,7 @@ class AssessmentSessionService
                 ];
             }
             $previous = $this->previousPrompts($student, $levels);
+            $stage = 'generate';
             $assessment = $this->generator->generate(
                 ['key' => $specialization['key'], 'label' => $specialization['label']],
                 $plan,
@@ -195,6 +210,8 @@ class AssessmentSessionService
                 $minutes,
                 $previous,
             );
+
+            $stage = 'persist';
 
             return DB::transaction(function () use ($student, $ids, $levels, $plan, $assessment, $specialization, $mix, $minutes, $minimum, $previous): array {
                 StudentProfile::query()->whereKey($student->id)->lockForUpdate()->first();
@@ -256,6 +273,21 @@ class AssessmentSessionService
             }
 
             throw $exception;
+        } catch (QueryException $exception) {
+            // رسالة PDO (حالة SQL ونص الخطأ) دون الاستعلام وقيمه؛ المعاملة أُلغيت فلا جلسة ولا محاولة محتسبة
+            Log::error('Assessment start failed at the database.', [
+                'stage' => $stage,
+                'sqlstate' => (string) ($exception->errorInfo[0] ?? $exception->getCode()),
+                'driver_code' => $exception->errorInfo[1] ?? null,
+                'error' => mb_substr((string) ($exception->getPrevious()?->getMessage() ?? ''), 0, 300),
+            ]);
+
+            throw new AssessmentException(
+                'تعذر حفظ التقييم بسبب خطأ في الخادم. لم يُنشأ أي تقييم ولم تُحتسب محاولة؛ حاول مرة أخرى بعد قليل.',
+                'assessment_storage_failed',
+                503,
+                retryable: true
+            );
         } finally {
             $lock->release();
         }

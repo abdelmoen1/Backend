@@ -9,12 +9,18 @@ use App\Models\Skill;
 use App\Models\SkillAssessment;
 use App\Models\StudentProfile;
 use App\Models\User;
+use App\Services\Assessments\AssessmentSchema;
 use Closure;
 use Database\Seeders\SpecializationSeeder;
+use Illuminate\Database\QueryException;
+use Illuminate\Database\Schema\Blueprint;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\Schema;
 use Illuminate\Testing\TestResponse;
+use PDOException;
 use Tests\Support\FakesAssessmentGemini;
 use Tests\TestCase;
 
@@ -248,6 +254,74 @@ class FreeResponseAssessmentTest extends TestCase
         // المحاولة الثانية الصالحة بعد رد غير صالح تنجح؛ الفشل لا يُحتسب ضمن الحد اليومي
         $this->fakeGemini(fn (int $attempt): array => $attempt === 1 ? ['questions' => []] : $valid());
         $this->postJson('/api/student/assessment-sessions', $this->payload($levels))->assertCreated();
+    }
+
+    public function test_start_is_blocked_before_generation_when_migrations_have_not_run(): void
+    {
+        // كقاعدة إنتاج نُشر لها الكود دون تشغيل migration 000019
+        Schema::table('assessment_sessions', fn (Blueprint $table) => $table->dropColumn('skill_levels'));
+        $this->fakeGemini($this->generated(['PHP' => 'beginner']));
+        Log::spy();
+        $student = $this->student('schema@example.test');
+
+        $response = $this->actingAs($student, 'sanctum')
+            ->postJson('/api/student/assessment-sessions', $this->payload(['PHP' => 'beginner']))
+            ->assertStatus(503)
+            ->assertJsonPath('code', 'assessment_unavailable')
+            ->assertJsonPath('retryable', false)
+            ->assertHeader('X-Request-Id');
+
+        $this->assertStringNotContainsString('skill_levels', $response->getContent());
+        Http::assertNothingSent();
+        $this->assertDatabaseCount('assessment_sessions', 0);
+        Log::shouldHaveReceived('critical')->once()->withArgs(
+            fn (string $message, array $context): bool => $context['stage'] === 'schema'
+                && $context['problems'] === ['assessment_sessions.skill_levels']
+        );
+
+        // عمود الإجابة الذي يجب أن يقبل NULL لسؤال المقال يُفحص أيضًا
+        Schema::table('assessment_sessions', fn (Blueprint $table) => $table->json('skill_levels')->nullable());
+        Schema::table('assessment_session_answers', fn (Blueprint $table) => $table->unsignedBigInteger('skill_id')->nullable(false)->change());
+        $this->assertSame(['assessment_session_answers.skill_id (not nullable)'], AssessmentSchema::problems());
+    }
+
+    public function test_a_database_failure_while_saving_creates_nothing_and_a_retry_succeeds(): void
+    {
+        $this->fakeGemini($this->generated(['PHP' => 'expert']));
+        $student = $this->student('storage@example.test');
+        AssessmentSession::creating(function (): void {
+            $driver = new PDOException("SQLSTATE[22001]: String data, right truncated: 1406 Data too long for column 'title' at row 1");
+            $driver->errorInfo = ['22001', 1406, "Data too long for column 'title' at row 1"];
+
+            throw new QueryException('mysql', 'insert into `assessment_sessions` (`title`) values (?)', ['secret question text'], $driver);
+        });
+        Log::spy();
+
+        $response = $this->actingAs($student, 'sanctum')
+            ->postJson('/api/student/assessment-sessions', $this->payload(['PHP' => 'expert']))
+            ->assertStatus(503)
+            ->assertJsonPath('code', 'assessment_storage_failed')
+            ->assertJsonPath('retryable', true);
+
+        foreach (['SQLSTATE', 'insert into', 'secret question text', 'Data too long'] as $private) {
+            $this->assertStringNotContainsString($private, $response->getContent());
+        }
+        $this->assertDatabaseCount('assessment_sessions', 0);
+        $this->assertDatabaseCount('student_skills', 0);
+        Log::shouldHaveReceived('error')->once()->withArgs(
+            fn (string $message, array $context): bool => $context['stage'] === 'persist'
+                && $context['sqlstate'] === '22001'
+                && $context['driver_code'] === 1406
+                && ! str_contains(json_encode($context), 'secret question text')
+        );
+
+        // القفل حُرر والفشل لم يُحتسب محاولة: إعادة المحاولة تنشئ الجلسة
+        AssessmentSession::flushEventListeners();
+        $this->travel(61)->seconds();
+        $this->postJson('/api/student/assessment-sessions', $this->payload(['PHP' => 'expert']))
+            ->assertCreated()
+            ->assertJsonPath('data.current_question.skill.level', 'expert');
+        $this->assertDatabaseCount('assessment_sessions', 1);
     }
 
     public function test_non_programming_skills_get_scenario_and_task_questions(): void
