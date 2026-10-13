@@ -224,8 +224,9 @@ class ProjectPublicationMatchingTest extends TestCase
             ->getJson("/api/student/opportunities/{$opportunity->id}")
             ->assertOk()
             ->assertJsonPath('data.eligibility.status', OpportunityMatcher::SKILL_NOT_SELECTED)
-            ->assertJsonPath('data.roles.0.eligibility.reasons.0.message', 'مهارة Flutter ليست ضمن مهارات ملفك بعد. ابدأ اختبار المهارة لإضافتها ومعرفة مدى توافقك مع هذه الفرصة.')
-            ->assertJsonPath('data.roles.0.eligibility.reasons.0.action.type', 'assessment')
+            ->assertJsonPath('data.roles.0.eligibility.reasons.0.message', 'مهارة Flutter ليست ضمن مهارات ملفك بعد. أضفها إلى ملفك ثم اختبرها لمعرفة مدى توافقك مع هذه الفرصة.')
+            // التقييم يقبل مهارات الملف فقط، فالخطوة التالية إضافة المهارة إلى الملف
+            ->assertJsonPath('data.roles.0.eligibility.reasons.0.action.type', 'profile')
             ->assertJsonPath('data.scope.functional_scope.0.group', 'المواعيد')
             ->assertJsonPath('data.organization.name', 'Clinic');
         $body = $detail->getContent();
@@ -248,7 +249,7 @@ class ProjectPublicationMatchingTest extends TestCase
         $expectations = [
             [$selfDeclared, OpportunityMatcher::ASSESSMENT_REQUIRED, 'لم تختبر مهارة Flutter بعد. ابدأ اختبار المهارة لمعرفة مدى توافقك مع هذه الفرصة.'],
             [$failed, OpportunityMatcher::ASSESSMENT_REQUIRED, 'لم تجتز اختبار مهارة Laravel بعد. أعد اختبار المهارة لمعرفة مدى توافقك مع هذه الفرصة.'],
-            [$partial, OpportunityMatcher::SKILL_NOT_SELECTED, 'مهارة Dart ليست ضمن مهارات ملفك بعد. ابدأ اختبار المهارة لإضافتها ومعرفة مدى توافقك مع هذه الفرصة.'],
+            [$partial, OpportunityMatcher::SKILL_NOT_SELECTED, 'مهارة Dart ليست ضمن مهارات ملفك بعد. أضفها إلى ملفك ثم اختبرها لمعرفة مدى توافقك مع هذه الفرصة.'],
             [$unselected, OpportunityMatcher::SKILL_NOT_SELECTED, 'مهارة REST API مثبتة لديك لكنها ليست ضمن مهارات ملفك. أضفها إلى ملفك لتُحتسب في هذا الدور.'],
         ];
         foreach ($expectations as [$student, $status, $message]) {
@@ -508,6 +509,13 @@ class ProjectPublicationMatchingTest extends TestCase
 
         $this->getJson('/api/student/opportunities')
             ->assertJsonPath('data.opportunities.0.eligibility.status', OpportunityMatcher::SKILL_NOT_SELECTED);
+
+        // لا تقييم لمهارة خارج الملف: يضيفها الطالب أولًا ثم يختبرها
+        $this->postJson('/api/student/assessment-sessions', ['skills' => [['skill_id' => $rest, 'level' => 'beginner']]])
+            ->assertUnprocessable()
+            ->assertJsonPath('code', 'skill_not_in_profile');
+        $this->postJson('/api/student/skills', ['skill_id' => $rest])->assertSuccessful();
+        $this->postJson('/api/student/skills', ['skill_id' => $laravel])->assertSuccessful();
 
         // REST API مبتدئ (المطلوب) + Laravel مبتدئ (أقل من المطلوب)
         $this->completeAttempt($rest, 'beginner', 'FULL', 'R1');

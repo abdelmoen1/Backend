@@ -37,7 +37,7 @@ class ProjectDiscoveryService
                 'responseSchema' => $this->responseSchema(),
                 'maxOutputTokens' => 4096,
             ];
-            $thinkingConfig = $this->thinkingConfig();
+            $thinkingConfig = GeminiProvider::thinkingConfig();
             if ($thinkingConfig !== []) {
                 $generationConfig['thinkingConfig'] = $thinkingConfig;
             }
@@ -77,22 +77,6 @@ class ProjectDiscoveryService
         }
 
         return $normalizedOutput;
-    }
-
-    private function thinkingConfig(): array
-    {
-        $configured = config('services.gemini.thinking_budget');
-        if ($configured !== null && $configured !== '') {
-            return ['thinkingBudget' => (int) $configured];
-        }
-
-        $model = (string) config('services.gemini.model');
-        // Only force zero thinking budget for known thinking/large models to avoid slowness
-        if (preg_match('/(?:gemini-3\.5|thinking|pro)/i', $model) === 1) {
-            return ['thinkingBudget' => 0];
-        }
-
-        return [];
     }
 
     private static function systemInstruction(): string
