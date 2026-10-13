@@ -324,6 +324,41 @@ class FreeResponseAssessmentTest extends TestCase
         $this->assertDatabaseCount('assessment_sessions', 1);
     }
 
+    public function test_an_unexpected_database_error_never_logs_answers_rubrics_or_sql(): void
+    {
+        config(['app.debug' => false]);
+        $this->fakeGemini($this->generated(['PHP' => 'beginner']));
+        $student = $this->student('log-safety@example.test');
+        $sessionId = $this->start($student, ['PHP' => 'beginner']);
+        $rubric = AssessmentSession::query()->sole()->questions[0]['rubric']['reference_answer'];
+        $answer = 'SECRET-STUDENT-ANSWER function total() {}';
+        // خطأ غير متوقع خارج معالجة البدء: رسالة QueryException الافتراضية تحوي الاستعلام بقيمه
+        AssessmentSessionAnswer::creating(function () use ($answer, $rubric): void {
+            $driver = new PDOException("SQLSTATE[HY000]: General error: 1366 Incorrect string value: 'SECRET-FRAGMENT' for column 'answer' at row 1");
+            $driver->errorInfo = ['HY000', 1366, "Incorrect string value: 'SECRET-FRAGMENT' for column 'answer' at row 1"];
+
+            throw new QueryException('mysql', 'insert into `assessment_session_answers` (`answer`, `grade`) values (?, ?)', [$answer, $rubric], $driver);
+        });
+        $logged = [];
+        Log::listen(function ($entry) use (&$logged): void {
+            $logged[] = $entry->message.' '.json_encode($entry->context, JSON_UNESCAPED_UNICODE)
+                .' '.(($entry->context['exception'] ?? null) instanceof \Throwable ? (string) $entry->context['exception'] : '');
+        });
+
+        $response = $this->postJson($this->answerUrl($sessionId), ['question_id' => 'q1', 'answer' => $answer])
+            ->assertStatus(500)
+            ->assertHeader('X-Request-Id');
+
+        $this->assertNotEmpty($logged, 'The failure is still reported.');
+        $all = implode("\n", $logged).$response->getContent();
+        foreach (['SECRET-STUDENT-ANSWER', 'SECRET-FRAGMENT', $rubric, 'insert into', 'values ('] as $private) {
+            $this->assertStringNotContainsString($private, $all);
+        }
+        $this->assertStringContainsString('"sqlstate":"HY000"', $all);
+        $this->assertStringContainsString('"driver_code":1366', $all);
+        $this->assertStringContainsString("for column 'answer'", $all);
+    }
+
     public function test_non_programming_skills_get_scenario_and_task_questions(): void
     {
         $this->fakeGemini($this->generated(['Manual Testing' => 'beginner']));

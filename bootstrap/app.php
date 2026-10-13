@@ -1,8 +1,11 @@
 <?php
 
+use App\Support\QueryFailure;
+use Illuminate\Database\QueryException;
 use Illuminate\Foundation\Application;
 use Illuminate\Foundation\Configuration\Exceptions;
 use Illuminate\Foundation\Configuration\Middleware;
+use Illuminate\Support\Facades\Log;
 
 return Application::configure(basePath: dirname(__DIR__))
     ->withRouting(
@@ -19,5 +22,10 @@ return Application::configure(basePath: dirname(__DIR__))
         $middleware->trimStrings(except: ['answer']);
     })
     ->withExceptions(function (Exceptions $exceptions) {
-        //
+        // لا يُكتب الاستعلام بقيمه في السجل (أسئلة التقييم ومعاييره وإجابات الطلاب)؛ false يمنع السجل الافتراضي
+        $exceptions->report(function (QueryException $exception): bool {
+            Log::error('Database query failed.', QueryFailure::context($exception));
+
+            return false;
+        });
     })->create();

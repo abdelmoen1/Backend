@@ -8,6 +8,7 @@ use App\Models\Skill;
 use App\Models\SkillAssessment;
 use App\Models\StudentProfile;
 use App\Services\Projects\SpecializationRoles;
+use App\Support\QueryFailure;
 use Illuminate\Database\QueryException;
 use Illuminate\Database\UniqueConstraintViolationException;
 use Illuminate\Support\Carbon;
@@ -274,13 +275,8 @@ class AssessmentSessionService
 
             throw $exception;
         } catch (QueryException $exception) {
-            // رسالة PDO (حالة SQL ونص الخطأ) دون الاستعلام وقيمه؛ المعاملة أُلغيت فلا جلسة ولا محاولة محتسبة
-            Log::error('Assessment start failed at the database.', [
-                'stage' => $stage,
-                'sqlstate' => (string) ($exception->errorInfo[0] ?? $exception->getCode()),
-                'driver_code' => $exception->errorInfo[1] ?? null,
-                'error' => mb_substr((string) ($exception->getPrevious()?->getMessage() ?? ''), 0, 300),
-            ]);
+            // حالة SQL ونص الخطأ دون الاستعلام وقيمه؛ المعاملة أُلغيت فلا جلسة ولا محاولة محتسبة
+            Log::error('Assessment start failed at the database.', ['stage' => $stage, ...QueryFailure::context($exception)]);
 
             throw new AssessmentException(
                 'تعذر حفظ التقييم بسبب خطأ في الخادم. لم يُنشأ أي تقييم ولم تُحتسب محاولة؛ حاول مرة أخرى بعد قليل.',
