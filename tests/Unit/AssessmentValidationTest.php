@@ -18,69 +18,76 @@ class AssessmentValidationTest extends TestCase
 {
     use FakesAssessmentGemini;
 
-    public function test_practical_questions_are_distributed_with_at_least_three_per_skill(): void
+    public function test_tasks_are_distributed_with_at_least_three_per_skill(): void
     {
-        $this->assertSame([9], AssessmentQuestionGenerator::practicalDistribution(1, 9));
-        $this->assertSame([5, 4], AssessmentQuestionGenerator::practicalDistribution(2, 9));
-        $this->assertSame([3, 3, 3], AssessmentQuestionGenerator::practicalDistribution(3, 9));
-        // أربع مهارات لا تحقق حد 3 أسئلة لكل مهارة (لهذا الحد الأقصى 3)
-        $this->assertSame(2, min(AssessmentQuestionGenerator::practicalDistribution(4, 9)));
+        $this->assertSame([10], AssessmentQuestionGenerator::practicalDistribution(1, 10));
+        $this->assertSame([5, 5], AssessmentQuestionGenerator::practicalDistribution(2, 10));
+        $this->assertSame([4, 3, 3], AssessmentQuestionGenerator::practicalDistribution(3, 10));
+        // أربع مهارات لا تحقق حد 3 مهام لكل مهارة (لهذا الحد الأقصى 3)
+        $this->assertSame(2, min(AssessmentQuestionGenerator::practicalDistribution(4, 10)));
     }
 
-    public function test_generated_sessions_must_match_the_plan_levels_and_skill_rubrics(): void
+    public function test_generated_coding_tasks_are_validated_against_the_plan(): void
     {
         $generator = app(AssessmentQuestionGenerator::class);
-        $plan = [$this->plan(10, 'PHP', 'intermediate', 5), $this->plan(20, 'Figma', 'expert', 4, programming: false)];
-        $valid = $this->generatedAssessment([10 => 'intermediate', 20 => ['expert', false]]);
+        $plan = [$this->plan(10, 'PHP', 'intermediate', 5), $this->plan(20, 'JavaScript', 'expert', 5)];
+        $valid = $this->generatedAssessment([10 => 'intermediate', 20 => 'expert']);
 
-        $result = $generator->validate($valid, $plan, 1);
+        $result = $generator->validate($valid, $plan, [], 3);
         $this->assertSame(array_map(fn (int $n): string => "q{$n}", range(1, 10)), array_column($result['questions'], 'id'));
-        $this->assertSame([...array_fill(0, 5, 10), ...array_fill(0, 4, 20), null], array_column($result['questions'], 'skill_id'));
-        $this->assertSame([...array_fill(0, 9, 'practical'), 'written'], array_column($result['questions'], 'category'));
-        $this->assertSame([10, 20], $result['questions'][9]['skill_ids']);
-        $this->assertSame([10, 20], array_column($result['questions'][9]['rubric']['criteria'], 'skill_id'));
-        $this->assertSame(['scenario', 'text'], [$result['questions'][5]['type'], $result['questions'][5]['format']]);
+        $this->assertSame([...array_fill(0, 5, 10), ...array_fill(0, 5, 20)], array_column($result['questions'], 'skill_id'));
+        // الصعوبة والنوع من خطة الخادم، والمعرّفات والمجموع يحسبها الخادم
+        $this->assertSame([...array_fill(0, 5, 'intermediate'), ...array_fill(0, 5, 'expert')], array_column($result['questions'], 'difficulty'));
+        $this->assertSame(['coding'], array_values(array_unique(array_column($result['questions'], 'type'))));
+        $this->assertSame(['c1', 'c2'], array_column($result['questions'][0]['rubric']['criteria'], 'id'));
+        $this->assertSame([10, 10], array_column($result['questions'][0]['rubric']['criteria'], 'skill_id'));
+        $this->assertSame(10, $result['questions'][0]['max_points']);
         $this->assertArrayNotHasKey('options', $result['questions'][0]);
 
-        // التوزيع يتبع الخطة: 6 + 3 مرفوض حتى لو كان المجموع 9
+        // مهارة تأخذ مهام غيرها حتى 7 + 3 مقبول؛ 8 + 2 أقل من الحد الأدنى لمهارة
         $skewed = $valid;
-        $skewed['questions'][5] = ['skill_id' => 10, 'type' => 'coding', 'difficulty' => 'intermediate'] + $skewed['questions'][5];
-        $skewed['questions'][5]['criteria'] = [['skill_id' => 10, 'description' => 'x', 'points' => 5]];
-        $this->assertNull($generator->validate($skewed, $plan, 1));
-        // عدد خاطئ، أو أسئلة مكررة، أو مطابقة حرفيًا لسؤال سابق
-        $this->assertNull($generator->validate(['questions' => array_slice($valid['questions'], 0, 9)], $plan, 1));
+        foreach ([5, 6] as $index) {
+            $skewed['questions'][$index]['skill_id'] = 10;
+        }
+        $this->assertSame([10 => 7, 20 => 3], array_count_values(array_column($generator->validate($skewed, $plan, [], 3)['questions'], 'skill_id')));
+        $skewed['questions'][7]['skill_id'] = 10;
+        $this->assertNull($generator->validate($skewed, $plan, [], 3));
+
+        // عدد ناقص، أو تكرار داخل الجلسة، أو مطابقة حرفية لمهمة سابقة: تُستبعد المهمة فيقل العدد
+        $this->assertNull($generator->validate(['questions' => array_slice($valid['questions'], 0, 9)], $plan, [], 3));
         $duplicate = $valid;
-        $duplicate['questions'][1]['prompt'] = $duplicate['questions'][0]['prompt'];
-        $this->assertNull($generator->validate($duplicate, $plan, 1));
-        $previous = [AssessmentQuestionGenerator::fingerprint("  {$valid['questions'][9]['prompt']} ")];
-        $this->assertNull($generator->validate($valid, $plan, 1, $previous));
+        $duplicate['questions'][1]['task'] = $duplicate['questions'][0]['task'];
+        $this->assertNull($generator->validate($duplicate, $plan, [], 3));
+        $previous = [AssessmentQuestionGenerator::fingerprint("  {$valid['questions'][9]['task']} ")];
+        $this->assertNull($generator->validate($valid, $plan, $previous, 3));
 
+        // كل مهمة تنقصها مادة التصحيح أو تشبه الاختيار من متعدد تُستبعد
         foreach ([
-            0 => ['type' => 'multiple_choice'],
-            1 => ['skill_id' => '10'],
-            2 => ['skill_id' => 99],
-            3 => ['difficulty' => 'expert'],
-            4 => ['criteria' => []],
-            5 => ['type' => 'coding'],
-            6 => ['difficulty' => 'intermediate'],
-            7 => ['criteria' => [['skill_id' => 10, 'description' => 'x', 'points' => 5]]],
-            8 => ['criteria' => array_fill(0, 7, ['skill_id' => 20, 'description' => 'x', 'points' => 1])],
-            9 => ['criteria' => [['skill_id' => 30, 'description' => 'x', 'points' => 5]]],
-        ] as $index => $change) {
+            ['skill_id' => 99],
+            ['skill_id' => null],
+            ['task' => 'قصير جدًا'],
+            ['task' => "ما ناتج الكود؟\nأ) 1\nب) 2"],
+            ['task' => 'صح أم خطأ: هذه الدالة تعيد المجموع الصحيح دائمًا.'],
+            ['reference_solution' => '  '],
+            ['rubric' => []],
+            ['rubric' => [['description' => 'x', 'points' => 11]]],
+            ['rubric' => [['description' => '', 'points' => 5]]],
+            ['rubric' => [['description' => 'x', 'points' => 2.5]]],
+            ['starter_code' => str_repeat('x', 4001)],
+            'not an object',
+        ] as $change) {
             $broken = $valid;
-            $broken['questions'][$index] = $change + $broken['questions'][$index];
-            $this->assertNull($generator->validate($broken, $plan, 1), json_encode([$index, $change]));
-        }
-        foreach ([['minimum_evidence' => ''], ['key_concepts' => []], ['prompt' => 'قصير'], ['criteria' => [['description' => 'x', 'points' => 5]]]] as $change) {
-            $broken = $valid;
-            $broken['questions'][9] = $change + $broken['questions'][9];
-            $this->assertNull($generator->validate($broken, $plan, 1), json_encode($change));
+            $broken['questions'][3] = is_array($change) ? $change + $broken['questions'][3] : $change;
+            $this->assertNull($generator->validate($broken, $plan, [], 3), json_encode($change));
         }
 
-        // تصحيح الأخطاء يحتاج كودًا معطى
-        $noContext = $valid;
-        $noContext['questions'][1]['code_context'] = "  \n";
-        $this->assertNull($generator->validate($noContext, $plan, 1));
+        // تفاصيل لا تخص التصحيح لا تُسقط المهمة: رقم المهارة نصًا، ونقاط 5.0، ولغة أو عنوان فارغ
+        $lenient = $valid;
+        $lenient['questions'][2] = ['skill_id' => '10', 'language' => '', 'title' => '', 'rubric' => [['description' => 'x', 'points' => 5.0]]] + $lenient['questions'][2];
+        $accepted = $generator->validate($lenient, $plan, [], 3)['questions'][2];
+        $this->assertSame([10, 'php', 5], [$accepted['skill_id'], $accepted['language'], $accepted['max_points']]);
+        $this->assertNotSame('', $accepted['title']);
+        $this->assertNull($generator->validate(['title' => 'x'], $plan, [], 3));
     }
 
     public function test_multi_skill_outcome_uses_only_each_skills_own_evidence(): void
@@ -154,12 +161,12 @@ class AssessmentValidationTest extends TestCase
         $this->assertSame(SkillAssessment::STATUS_INCOMPLETE, $service->multiSkillOutcome($questions, $ungradable, $settings, 2)[0]);
     }
 
-    private function plan(int $id, string $name, string $level, int $practical, bool $programming = true): array
+    private function plan(int $id, string $name, string $level, int $practical): array
     {
         $skill = new Skill(['name' => $name]);
         $skill->id = $id;
 
-        return ['skill' => $skill, 'level' => $level, 'programming' => $programming, 'human_verification' => false, 'practical' => $practical];
+        return ['skill' => $skill, 'level' => $level, 'practical' => $practical];
     }
 
     public function test_multiple_choice_prompts_are_detected(): void
@@ -181,20 +188,22 @@ class AssessmentValidationTest extends TestCase
         }
     }
 
-    public function test_grades_must_match_the_rubric_and_points_are_summed_by_laravel(): void
+    public function test_code_reviews_must_match_the_rubric_and_points_are_summed_by_laravel(): void
     {
         $grader = app(AssessmentGrader::class);
         $question = [
             'id' => 'q2',
             'max_points' => 10,
-            'rubric' => ['criteria' => [['id' => 'c1', 'description' => 'a', 'points' => 6], ['id' => 'c2', 'description' => 'b', 'points' => 4]]],
+            'rubric' => ['criteria' => [['id' => 'c1', 'description' => 'a', 'points' => 6], ['id' => 'c2', 'description' => 'b', 'points' => 4]], 'reference_solution' => 'x'],
         ];
         $grade = fn (array $changes = []): array => $changes + [
             'question_id' => 'q2',
-            'status' => 'graded',
+            'verdict' => 'partially_correct',
             'criteria' => [['id' => 'c2', 'awarded' => 4, 'justification' => 'x'], ['id' => 'c1', 'awarded' => 3, 'justification' => 'y']],
+            'issues' => ['لا يعالج القيم السالبة.', ''],
             'feedback' => 'جيد جزئيًا.',
-            // مجموع يدعيه النموذج يُتجاهل
+            'reasoning' => 'المنطق صحيح جزئيًا.',
+            // مجموع أو نجاح يدعيه النموذج يُتجاهل
             'total' => 10,
             'passed' => true,
         ];
@@ -203,14 +212,19 @@ class AssessmentValidationTest extends TestCase
         $this->assertSame(7, $valid['awarded_points']);
         $this->assertSame(10, $valid['max_points']);
         $this->assertSame(['c1', 'c2'], array_column($valid['criteria'], 'id'));
+        $this->assertSame(['partially_correct', ['لا يعالج القيم السالبة.'], 'المنطق صحيح جزئيًا.', 'graded'], [$valid['verdict'], $valid['issues'], $valid['reasoning'], $valid['status']]);
         $this->assertArrayNotHasKey('passed', $valid);
+        // question_id اختياري؛ لكنه إن وُجد يجب أن يطابق
+        $this->assertNotNull($grader->validate(array_diff_key($grade(), ['question_id' => true]), $question));
 
-        // إجابة غير كافية = صفر مهما كانت درجات المعايير
-        $this->assertSame(0, $grader->validate($grade(['status' => 'insufficient_answer']), $question)['awarded_points']);
+        // لا حل = صفر مهما كانت درجات المعايير
+        $none = $grader->validate($grade(['verdict' => 'no_solution']), $question);
+        $this->assertSame([0, 'insufficient_answer'], [$none['awarded_points'], $none['status']]);
 
         foreach ([
             ['question_id' => 'q3'],
-            ['status' => 'passed'],
+            ['verdict' => 'passed'],
+            ['verdict' => null],
             ['criteria' => [['id' => 'c1', 'awarded' => 7, 'justification' => 'x'], ['id' => 'c2', 'awarded' => 0, 'justification' => 'x']]],
             ['criteria' => [['id' => 'c1', 'awarded' => -1, 'justification' => 'x'], ['id' => 'c2', 'awarded' => 0, 'justification' => 'x']]],
             ['criteria' => [['id' => 'c1', 'awarded' => 2.5, 'justification' => 'x'], ['id' => 'c2', 'awarded' => 0, 'justification' => 'x']]],

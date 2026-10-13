@@ -5,6 +5,7 @@ namespace App\Services\Assessments;
 use App\Contracts\AIProvider;
 use App\Services\AI\AIProviderConfigurationException;
 use App\Services\AI\GeminiFailure;
+use App\Services\AI\GeminiProvider;
 use App\Services\AI\GeminiStructuredOutput;
 use Illuminate\Http\Client\ConnectionException;
 use Illuminate\Support\Facades\Log;
@@ -20,6 +21,12 @@ class AssessmentAiClient
 
     public function json(array $payload, string $operation): mixed
     {
+        // إعداد التفكير نفسه الذي يستخدمه اكتشاف المشاريع (نموذج واحد وإعدادات واحدة)
+        $thinking = GeminiProvider::thinkingConfig();
+        if ($thinking !== [] && ! isset($payload['generationConfig']['thinkingConfig'])) {
+            $payload['generationConfig']['thinkingConfig'] = $thinking;
+        }
+
         try {
             $response = $this->provider->generateResponse($payload);
         } catch (AIProviderConfigurationException) {

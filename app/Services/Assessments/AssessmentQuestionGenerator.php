@@ -7,54 +7,50 @@ use Illuminate\Support\Facades\Log;
 use JsonException;
 
 /**
- * يولّد Gemini أسئلة جلسة تقييم واحدة تغطي حتى 3 مهارات، لكل مهارة مستواها الذي اختاره الطالب، مع معايير تصحيح
- * خاصة لكل سؤال. الخادم يحدد خطة التوزيع (عدد الأسئلة العملية لكل مهارة) ولا يثق بالرد: يتحقق من أن كل سؤال
- * عملي لمهارة مختارة وبمستواها وبنوع يناسبها، ومن العدد لكل مهارة بالضبط، ومن أن معايير السؤال الكتابي (المقال)
- * تحدد كل منها المهارة التي تقيّمها، ومن حدود النقاط، ويرفض الاختيار من متعدد والأسئلة المطابقة حرفيًا لأسئلة
- * سابقة للطالب. محاولات محدودة، وعند الفشل لا تُنشأ جلسة ولا يُخترع سؤال.
+ * يولد Gemini مهامًا برمجية عملية للجلسة كلها: لكل مهارة مختارة عدد من المهام بمستواها، يكتب الطالب في كل منها كودًا
+ * (كتابة أو إكمال أو تعديل أو تصحيح). لكل مهمة حل مرجعي ومعايير تصحيح خاصة بالخادم.
+ *
+ * الخادم لا يثق بالرد: المهارة يجب أن تكون مختارة، والصعوبة والنوع يحددهما الخادم من الخطة، والمهمة التي ينقصها ما
+ * يلزم للتصحيح (نص المهمة، الحل المرجعي، معايير بنقاط صحيحة) أو تشبه الاختيار من متعدد تُستبعد وحدها. المجموعة
+ * تُرفض فقط إذا لم يبقَ العدد المطلوب أو قلّت مهام إحدى المهارات عن الحد الأدنى؛ عندها يُعاد التوليد مرة محدودة.
  */
 class AssessmentQuestionGenerator
 {
-    public const PROMPT_VERSION = 'free-response-generation-v3';
-
-    public const FORMATS = ['text', 'code'];
+    public const PROMPT_VERSION = 'coding-task-generation-v4';
 
     public const CATEGORY_PRACTICAL = 'practical';
 
+    /** أسئلة كتابية في جلسات الإصدارات السابقة فقط؛ لا تولد بعد الآن */
     public const CATEGORY_WRITTEN = 'written';
 
-    /** أنواع الأسئلة العملية للمهارات البرمجية */
-    public const PROGRAMMING_PRACTICAL_TYPES = ['coding', 'debugging', 'sql', 'implementation', 'code_analysis'];
-
-    /** أنواع الأسئلة العملية للمهارات غير البرمجية (تصميم، اختبار يدوي، تحليل بيانات بالأدوات) */
-    public const NON_PROGRAMMING_PRACTICAL_TYPES = ['scenario', 'design_task', 'case_study'];
-
-    /** essay هو السؤال الكتابي للجلسة متعددة المهارات؛ البقية من جلسات الإصدار السابق */
-    public const WRITTEN_TYPES = ['essay', 'explanation', 'reasoning', 'technical_analysis'];
-
-    /** أنواع يُجاب عنها في محرر الكود؛ البقية نص */
-    public const CODE_TYPES = ['coding', 'debugging', 'sql', 'implementation'];
-
-    /** أنواع تحتاج كودًا معطى في السؤال */
-    public const CONTEXT_TYPES = ['debugging', 'code_analysis'];
+    public const TYPE_CODING = 'coding';
 
     public const MAX_CRITERIA = 6;
 
     public const MAX_CRITERION_POINTS = 10;
 
+    /** حد مخرجات التوليد: يكفي 10 مهام موجزة ويمنع ردًا طويلًا يتجاوز مهلة الطلب */
+    private const MAX_OUTPUT_TOKENS = 16384;
+
     public const LEVEL_GUIDANCE = [
-        SkillLevels::BEGINNER => 'beginner: أساسيات المهارة وصياغتها، مهام قصيرة بمفهوم واحد (كود حتى نحو 15 سطرًا)، أخطاء شائعة واضحة، وشرح مفاهيم أساسية بأمثلة بسيطة.',
-        SkillLevels::INTERMEDIATE => 'intermediate: الجمع بين عدة مفاهيم في ميزة واقعية صغيرة، تصحيح أخطاء في كود متوسط الطول، التحقق من المدخلات والحالات الحدية، ومقارنة بديلين مع التبرير.',
-        SkillLevels::ADVANCED => 'advanced: قرارات تصميم ومعمارية، الأداء والأمان والتزامن والحالات الحدية المعقدة، تصحيح أخطاء خفية، وتحليل مقايضات بعمق في سياق مشروع حقيقي.',
-        SkillLevels::EXPERT => 'expert: مشكلات مفتوحة على مستوى الإنتاج: تصميم أنظمة تتحمل الحمل والأعطال، تحسين أداء مقيس، أمان متقدم، تشخيص أعطال معقدة من أعراض جزئية، ومقايضات يبررها خبير مع حدود كل حل.',
+        SkillLevels::BEGINNER => 'beginner: دالة أو مقطع قصير بمفهوم واحد (حتى نحو 15 سطرًا)، مدخلات بسيطة، أو إصلاح خطأ واضح.',
+        SkillLevels::INTERMEDIATE => 'intermediate: ميزة صغيرة واقعية تجمع عدة مفاهيم، التحقق من المدخلات والحالات الحدية، أو تصحيح كود متوسط الطول.',
+        SkillLevels::ADVANCED => 'advanced: كود بقرارات تصميم، أداء أو أمان أو تزامن، حالات حدية معقدة، أو تصحيح خطأ خفي.',
+        SkillLevels::EXPERT => 'expert: مشكلة بمستوى الإنتاج: تحسين أداء، معالجة أعطال وحمل، أمان متقدم، أو إعادة هيكلة كود معقد مع الحفاظ على سلوكه.',
     ];
+
+    /** @var array{reason: string}|null سبب رفض آخر مجموعة برمز ثابت للسجل، دون أي نص من الرد */
+    private ?array $rejection = null;
+
+    /** @var array<string, int> أسباب استبعاد المهام في آخر تحقق وعددها */
+    private array $dropped = [];
 
     public function __construct(private readonly AssessmentAiClient $client) {}
 
     /**
-     * يوزع الأسئلة العملية على المهارات بالتساوي قدر الإمكان، والمهارات الأولى في اختيار الطالب تأخذ الباقي.
+     * يوزع المهام على المهارات بالتساوي قدر الإمكان، والمهارات الأولى في اختيار الطالب تأخذ الباقي.
      *
-     * @return array<int, int> عدد الأسئلة العملية لكل مهارة بترتيب الاختيار
+     * @return array<int, int> عدد المهام لكل مهارة بترتيب الاختيار
      */
     public static function practicalDistribution(int $skills, int $practical): array
     {
@@ -70,12 +66,13 @@ class AssessmentQuestionGenerator
 
     /**
      * @param  array{key: string, label: string}  $specialization
-     * @param  array<int, array{skill: Skill, level: string, programming: bool, human_verification: bool, practical: int}>  $plan  بترتيب اختيار الطالب
-     * @param  array<int, string>  $previousPrompts  أسئلة سابقة للطالب في المهارات والمستويات نفسها
+     * @param  array<int, array{skill: Skill, level: string, practical: int}>  $plan  بترتيب اختيار الطالب
+     * @param  array<int, string>  $previousPrompts  مهام سابقة للطالب في المهارات والمستويات نفسها
      * @return array{title: string, questions: array<int, array>}
      */
-    public function generate(array $specialization, array $plan, int $written, int $timeLimitMinutes, array $previousPrompts = []): array
+    public function generate(array $specialization, array $plan, int $timeLimitMinutes, array $previousPrompts = [], int $minimumPerSkill = 1): array
     {
+        $total = array_sum(array_column($plan, 'practical'));
         try {
             $context = json_encode([
                 'specialization' => $specialization,
@@ -84,16 +81,11 @@ class AssessmentQuestionGenerator
                     'name' => $item['skill']->name,
                     'level' => $item['level'],
                     'level_guidance' => self::LEVEL_GUIDANCE[$item['level']],
-                    'programming' => $item['programming'],
-                    'requires_human_verification' => $item['human_verification'],
-                    'practical_questions' => $item['practical'],
-                    'practical_types' => $item['programming'] ? self::PROGRAMMING_PRACTICAL_TYPES : self::NON_PROGRAMMING_PRACTICAL_TYPES,
+                    'tasks' => $item['practical'],
                 ], $plan),
-                'written_questions' => $written,
-                'written_type' => 'essay',
-                'total_questions' => array_sum(array_column($plan, 'practical')) + $written,
+                'total_tasks' => $total,
                 'time_limit_minutes' => $timeLimitMinutes,
-                'avoid_questions' => array_values($previousPrompts),
+                'avoid_tasks' => array_values($previousPrompts),
             ], JSON_UNESCAPED_UNICODE | JSON_THROW_ON_ERROR | JSON_INVALID_UTF8_SUBSTITUTE);
         } catch (JsonException) {
             throw AssessmentException::ai('ai_configuration_error', false, 'generation');
@@ -107,12 +99,17 @@ class AssessmentQuestionGenerator
                 'contents' => [['role' => 'user', 'parts' => [['text' => $context]]]],
                 'generationConfig' => [
                     'responseMimeType' => 'application/json',
-                    'responseSchema' => $this->schema($plan),
+                    'responseSchema' => $this->schema(),
+                    'maxOutputTokens' => self::MAX_OUTPUT_TOKENS,
                 ],
             ], 'generation');
 
-            $assessment = $this->validate($data, $plan, $written, $previous);
+            $assessment = $this->validate($data, $plan, $previous, $minimumPerSkill);
             if ($assessment !== null) {
+                if ($this->dropped !== []) {
+                    Log::info('Gemini assessment generation accepted after dropping unusable tasks.', ['provider' => 'gemini', 'attempt' => $attempt, 'dropped' => $this->dropped]);
+                }
+
                 return $assessment;
             }
 
@@ -120,6 +117,8 @@ class AssessmentQuestionGenerator
                 'provider' => 'gemini',
                 'attempt' => $attempt,
                 'max_attempts' => $attempts,
+                ...($this->rejection ?? ['reason' => 'unknown']),
+                'dropped' => $this->dropped,
             ]);
         }
 
@@ -127,216 +126,90 @@ class AssessmentQuestionGenerator
     }
 
     /**
-     * يعيد null لأي رد لا يطابق الخطة والقواعد بالكامل.
+     * يعيد المجموعة جاهزة للحفظ، أو null إن لم تكفِ المهام الصالحة للخطة. المهام الزائدة عن الخطة تُترك.
      *
-     * @param  array<int, array{skill: Skill, level: string, programming: bool, human_verification: bool, practical: int}>  $plan
+     * @param  array<int, array{skill: Skill, level: string, practical: int}>  $plan
      * @param  array<int, string>  $previousFingerprints
      */
-    public function validate(mixed $data, array $plan, int $written, array $previousFingerprints = []): ?array
+    public function validate(mixed $data, array $plan, array $previousFingerprints = [], int $minimumPerSkill = 1): ?array
     {
+        $this->rejection = null;
+        $this->dropped = [];
         if (! is_array($data) || ! is_array($data['questions'] ?? null) || ! array_is_list($data['questions'])) {
-            return null;
-        }
-        if (count($data['questions']) !== array_sum(array_column($plan, 'practical')) + $written) {
-            return null;
+            return $this->reject('not_a_question_list');
         }
 
         $bySkill = [];
         foreach ($plan as $item) {
             $bySkill[(int) $item['skill']->id] = ['plan' => $item, 'questions' => []];
         }
-        $writtenQuestions = [];
+
         $seen = [];
-
         foreach ($data['questions'] as $item) {
-            $question = $this->question($item, $bySkill);
-            if ($question === null) {
-                return null;
+            [$question, $reason] = $this->question($item, $bySkill);
+            if ($question !== null) {
+                // لا تتكرر المهمة داخل الجلسة، ولا تطابق حرفيًا مهمة سبق أن طُرحت على الطالب
+                $fingerprint = self::fingerprint($question['prompt']);
+                $reason = match (true) {
+                    in_array($fingerprint, $seen, true) => 'duplicate_prompt',
+                    in_array($fingerprint, $previousFingerprints, true) => 'repeats_previous_question',
+                    default => null,
+                };
+                $seen[] = $fingerprint;
             }
-            // لا يتكرر السؤال داخل الجلسة، ولا يطابق حرفيًا سؤالًا سبق أن طُرح على الطالب
-            $fingerprint = self::fingerprint($question['prompt']);
-            if (in_array($fingerprint, $seen, true) || in_array($fingerprint, $previousFingerprints, true)) {
-                return null;
-            }
-            $seen[] = $fingerprint;
+            if ($reason !== null) {
+                $this->dropped[$reason] = ($this->dropped[$reason] ?? 0) + 1;
 
-            if ($question['category'] === self::CATEGORY_WRITTEN) {
-                $writtenQuestions[] = $question;
-            } else {
-                $bySkill[$question['skill_id']]['questions'][] = $question;
+                continue;
+            }
+            $bySkill[$question['skill_id']]['questions'][] = $question;
+        }
+
+        // العدد المخطط لكل مهارة أولًا، ثم يُكمل النقص من مهام صالحة زائدة لمهارة أخرى
+        $take = [];
+        foreach ($bySkill as $skillId => $entry) {
+            $take[$skillId] = min($entry['plan']['practical'], count($entry['questions']));
+        }
+        $short = array_sum(array_column($plan, 'practical')) - array_sum($take);
+        foreach ($bySkill as $skillId => $entry) {
+            $extra = min($short, count($entry['questions']) - $take[$skillId]);
+            $take[$skillId] += $extra;
+            $short -= $extra;
+        }
+        if ($short > 0) {
+            return $this->reject('question_count');
+        }
+        foreach ($bySkill as $skillId => $entry) {
+            if ($take[$skillId] < min($minimumPerSkill, $entry['plan']['practical'])) {
+                return $this->reject('skill_coverage');
             }
         }
 
-        // التغطية الفعلية: لكل مهارة عدد أسئلتها العملية المخطط بالضبط، والسؤال الكتابي بالعدد المطلوب
-        if (count($writtenQuestions) !== $written) {
-            return null;
-        }
-        foreach ($bySkill as $entry) {
-            if (count($entry['questions']) !== $entry['plan']['practical']) {
-                return null;
-            }
-        }
-
-        // ترتيب ثابت: أسئلة كل مهارة بترتيب الاختيار ثم السؤال الكتابي، ومعرّفات يحددها الخادم
+        // ترتيب ثابت: مهام كل مهارة بترتيب اختيار الطالب، ومعرّفات يحددها الخادم
         $ordered = [];
-        foreach ([...array_merge(...array_column(array_values($bySkill), 'questions')), ...$writtenQuestions] as $question) {
-            $position = count($ordered) + 1;
-            $ordered[] = ['id' => "q{$position}", 'position' => $position] + $question;
+        foreach ($bySkill as $skillId => $entry) {
+            foreach (array_slice($entry['questions'], 0, $take[$skillId]) as $question) {
+                $position = count($ordered) + 1;
+                $ordered[] = ['id' => "q{$position}", 'position' => $position] + $question;
+            }
         }
 
-        $title = is_string($data['title'] ?? null) ? trim($data['title']) : '';
+        $title = $this->text($data['title'] ?? null, 200);
         $fallback = 'تقييم '.implode('، ', array_map(fn (array $item): string => $item['skill']->name, $plan));
 
         return [
-            'title' => mb_substr($title !== '' ? $title : $fallback, 0, 200),
+            'title' => $title !== '' ? $title : $fallback,
             'questions' => $ordered,
         ];
     }
 
-    /** بصمة نصية لمقارنة الأسئلة حرفيًا بعد توحيد المسافات وحالة الأحرف. */
+    /** بصمة نصية لمقارنة المهام حرفيًا بعد توحيد المسافات وحالة الأحرف. */
     public static function fingerprint(string $prompt): string
     {
         return mb_strtolower(trim(preg_replace('/\s+/u', ' ', $prompt)));
     }
 
-    public static function categoryOf(string $type, bool $programming): ?string
-    {
-        if (in_array($type, self::WRITTEN_TYPES, true)) {
-            return self::CATEGORY_WRITTEN;
-        }
-        $practical = $programming ? self::PROGRAMMING_PRACTICAL_TYPES : self::NON_PROGRAMMING_PRACTICAL_TYPES;
-
-        return in_array($type, $practical, true) ? self::CATEGORY_PRACTICAL : null;
-    }
-
-    /** @param array<int, array{plan: array, questions: array}> $bySkill */
-    private function question(mixed $item, array $bySkill): ?array
-    {
-        if (! is_array($item)) {
-            return null;
-        }
-
-        $type = is_string($item['type'] ?? null) ? $item['type'] : '';
-        $prompt = $this->text($item['prompt'] ?? null, 2000);
-        $codeContext = is_string($item['code_context'] ?? null) ? rtrim($item['code_context']) : '';
-        $language = $this->text($item['language'] ?? null, 30);
-        $reference = $this->text($item['reference_answer'] ?? null, 4000);
-        $minimum = $this->text($item['minimum_evidence'] ?? null, 1000);
-        $concepts = $this->stringList($item['key_concepts'] ?? null, 10, 300);
-        $mistakes = $this->stringList($item['common_mistakes'] ?? [], 8, 300);
-
-        if (mb_strlen($prompt) < 15
-            || mb_strlen($codeContext) > 4000
-            || $reference === '' || $minimum === ''
-            || $concepts === null || $concepts === [] || $mistakes === null
-            || self::looksLikeMultipleChoice($prompt)) {
-            return null;
-        }
-
-        $selected = array_keys($bySkill);
-        if (in_array($type, self::WRITTEN_TYPES, true)) {
-            // المقال: كل معيار يحدد المهارة التي يقيّمها، ولا تُمنح نقاط مهارة لا يقيّمها أي معيار
-            $criteria = $this->criteria($item['criteria'] ?? null, $selected, null);
-            if ($criteria === null) {
-                return null;
-            }
-            $skillIds = array_values(array_intersect($selected, array_unique(array_column($criteria, 'skill_id'))));
-
-            return $this->build(null, $skillIds, $type, self::CATEGORY_WRITTEN, 'text', null, $prompt, $codeContext, $language, $criteria, $reference, $concepts, $mistakes, $minimum);
-        }
-
-        // سؤال عملي: لمهارة مختارة واحدة، بمستواها بالضبط، وبنوع يناسبها (كود للبرمجية، مهام لغيرها)
-        $skillId = $item['skill_id'] ?? null;
-        $entry = is_int($skillId) ? ($bySkill[$skillId] ?? null) : null;
-        if ($entry === null
-            || self::categoryOf($type, $entry['plan']['programming']) !== self::CATEGORY_PRACTICAL
-            || ($item['difficulty'] ?? null) !== $entry['plan']['level']
-            || (in_array($type, self::CONTEXT_TYPES, true) && trim($codeContext) === '')) {
-            return null;
-        }
-        $criteria = $this->criteria($item['criteria'] ?? null, $selected, $skillId);
-        if ($criteria === null) {
-            return null;
-        }
-
-        return $this->build(
-            $skillId,
-            [$skillId],
-            $type,
-            self::CATEGORY_PRACTICAL,
-            in_array($type, self::CODE_TYPES, true) ? 'code' : 'text',
-            $entry['plan']['level'],
-            $prompt,
-            $codeContext,
-            $language,
-            $criteria,
-            $reference,
-            $concepts,
-            $mistakes,
-            $minimum
-        );
-    }
-
-    private function build(?int $skillId, array $skillIds, string $type, string $category, string $format, ?string $difficulty, string $prompt, string $codeContext, string $language, array $criteria, string $reference, array $concepts, array $mistakes, string $minimum): array
-    {
-        return [
-            // null للمقال: مهاراته في skill_ids ومعاييره
-            'skill_id' => $skillId,
-            'skill_ids' => $skillIds,
-            'type' => $type,
-            'category' => $category,
-            'format' => $format,
-            'difficulty' => $difficulty,
-            'prompt' => $prompt,
-            'code_context' => $codeContext,
-            'language' => $language,
-            'max_points' => array_sum(array_column($criteria, 'points')),
-            // خاص بالخادم: لا يُرسل للطالب أبدًا
-            'rubric' => [
-                'criteria' => $criteria,
-                'reference_answer' => $reference,
-                'key_concepts' => $concepts,
-                'common_mistakes' => $mistakes,
-                'minimum_evidence' => $minimum,
-            ],
-        ];
-    }
-
-    /**
-     * @param  array<int, int>  $selected
-     * @param  ?int  $questionSkill  مهارة السؤال العملي (كل معاييره لها)، أو null للمقال (كل معيار يحدد مهارته)
-     */
-    private function criteria(mixed $items, array $selected, ?int $questionSkill): ?array
-    {
-        if (! is_array($items) || ! array_is_list($items) || $items === [] || count($items) > self::MAX_CRITERIA) {
-            return null;
-        }
-
-        $criteria = [];
-        foreach ($items as $index => $item) {
-            $description = is_array($item) ? $this->text($item['description'] ?? null, 500) : '';
-            $points = is_array($item) ? ($item['points'] ?? null) : null;
-            $skillId = is_array($item) ? ($item['skill_id'] ?? null) : null;
-            if ($description === '' || ! is_int($points) || $points < 1 || $points > self::MAX_CRITERION_POINTS) {
-                return null;
-            }
-            if ($questionSkill !== null) {
-                // معيار سؤال عملي لا يقيّم مهارة أخرى
-                if ($skillId !== null && $skillId !== $questionSkill) {
-                    return null;
-                }
-                $skillId = $questionSkill;
-            } elseif (! is_int($skillId) || ! in_array($skillId, $selected, true)) {
-                return null;
-            }
-            // معرّفات المعايير يحددها الخادم حتى لا تعتمد مطابقة التصحيح على نص يولده النموذج
-            $criteria[] = ['id' => 'c'.($index + 1), 'skill_id' => $skillId, 'description' => $description, 'points' => $points];
-        }
-
-        return $criteria;
-    }
-
-    /** صيغة اختيار من متعدد ممنوعة: خيارات مرقمة بالحروف أو طلب "اختر الإجابة". */
+    /** صيغة اختيار من متعدد أو صح وخطأ ممنوعة: خيارات مرقمة بالحروف أو طلب "اختر الإجابة". */
     public static function looksLikeMultipleChoice(string $prompt): bool
     {
         $optionLines = preg_match_all('/^\s*(?:\(?[a-dA-Dأبجد][\)\.\-:]|[a-dA-D]\s*\))\s+\S/mu', $prompt);
@@ -347,58 +220,151 @@ class AssessmentQuestionGenerator
         return preg_match('/اختر\s+(?:الإجابة|الخيار|من\s+بين)|(?:choose|select|pick)\s+(?:the\s+)?(?:correct|right|best)\s+(?:answer|option)|which\s+of\s+the\s+following|صح\s+أم\s+خطأ|true\s+or\s+false/iu', $prompt) === 1;
     }
 
+    /**
+     * مهمة واحدة جاهزة للحفظ، أو سبب استبعادها.
+     *
+     * @param  array<int, array{plan: array, questions: array}>  $bySkill
+     * @return array{0: ?array, 1: ?string}
+     */
+    private function question(mixed $item, array $bySkill): array
+    {
+        if (! is_array($item)) {
+            return [null, 'not_an_object'];
+        }
+
+        $skillId = is_numeric($item['skill_id'] ?? null) ? (int) $item['skill_id'] : null;
+        $entry = $skillId !== null ? ($bySkill[$skillId] ?? null) : null;
+        $task = $this->text($item['task'] ?? null, 3000);
+        $starter = is_string($item['starter_code'] ?? null) ? rtrim($item['starter_code']) : '';
+        $solution = is_string($item['reference_solution'] ?? null) ? trim($item['reference_solution']) : '';
+        $criteria = $this->criteria($item['rubric'] ?? null, $skillId);
+
+        $reason = match (true) {
+            $entry === null => 'unknown_skill',
+            mb_strlen($task) < 20 => 'prompt_too_short',
+            self::looksLikeMultipleChoice($task) => 'multiple_choice',
+            mb_strlen($starter) > 4000 => 'code_context_too_long',
+            $solution === '' || mb_strlen($solution) > 8000 => 'missing_reference_solution',
+            $criteria === [] => 'invalid_criterion',
+            default => null,
+        };
+        if ($reason !== null) {
+            return [null, $reason];
+        }
+
+        $language = $this->text($item['language'] ?? null, 30);
+
+        return [[
+            'skill_id' => $skillId,
+            'skill_ids' => [$skillId],
+            'type' => self::TYPE_CODING,
+            'category' => self::CATEGORY_PRACTICAL,
+            'format' => 'code',
+            // الصعوبة من خطة الخادم لا من رد النموذج
+            'difficulty' => $entry['plan']['level'],
+            'title' => $this->text($item['title'] ?? null, 120) ?: mb_substr($task, 0, 80),
+            'prompt' => $task,
+            'language' => $language !== '' ? $language : mb_strtolower($entry['plan']['skill']->name),
+            'starter_code' => $starter,
+            'requirements' => $this->stringList($item['requirements'] ?? [], 8, 300),
+            'examples' => $this->examples($item['examples'] ?? []),
+            'max_points' => array_sum(array_column($criteria, 'points')),
+            // خاص بالخادم: لا يُرسل للطالب أبدًا
+            'rubric' => [
+                'criteria' => $criteria,
+                'reference_solution' => $solution,
+            ],
+        ], null];
+    }
+
+    /**
+     * معايير التصحيح الصالحة فقط (وصف ونقاط صحيحة 1..10، حتى MAX_CRITERIA)؛ مصفوفة فارغة إن لم يصلح أي معيار.
+     *
+     * @return array<int, array{id: string, skill_id: ?int, description: string, points: int}>
+     */
+    private function criteria(mixed $items, ?int $skillId): array
+    {
+        if (! is_array($items) || ! array_is_list($items)) {
+            return [];
+        }
+
+        $criteria = [];
+        foreach ($items as $item) {
+            $description = is_array($item) ? $this->text($item['description'] ?? null, 500) : '';
+            $points = is_array($item) ? ($item['points'] ?? null) : null;
+            if ($description === '' || ! is_numeric($points) || (int) $points != $points || $points < 1 || $points > self::MAX_CRITERION_POINTS) {
+                continue;
+            }
+            // معرّفات المعايير يحددها الخادم حتى لا تعتمد مطابقة التصحيح على نص يولده النموذج
+            $criteria[] = ['id' => 'c'.(count($criteria) + 1), 'skill_id' => $skillId, 'description' => $description, 'points' => (int) $points];
+            if (count($criteria) === self::MAX_CRITERIA) {
+                break;
+            }
+        }
+
+        return $criteria;
+    }
+
+    /** @return array<int, array{input: string, output: string}> أمثلة تظهر للطالب ضمن نص المهمة */
+    private function examples(mixed $items): array
+    {
+        if (! is_array($items)) {
+            return [];
+        }
+
+        $examples = [];
+        foreach (array_slice(array_values($items), 0, 3) as $item) {
+            $input = is_array($item) ? $this->text($item['input'] ?? null, 500) : '';
+            $output = is_array($item) ? $this->text($item['output'] ?? null, 500) : '';
+            if ($input !== '' || $output !== '') {
+                $examples[] = ['input' => $input, 'output' => $output];
+            }
+        }
+
+        return $examples;
+    }
+
+    private function reject(string $reason): null
+    {
+        $this->rejection = ['reason' => $reason];
+
+        return null;
+    }
+
     private function text(mixed $value, int $max): string
     {
         return is_string($value) ? mb_substr(trim($value), 0, $max) : '';
     }
 
-    /** @return array<int, string>|null */
-    private function stringList(mixed $items, int $maxItems, int $maxLength): ?array
+    /** @return array<int, string> */
+    private function stringList(mixed $items, int $maxItems, int $maxLength): array
     {
-        if (! is_array($items) || ! array_is_list($items)) {
-            return null;
+        if (! is_array($items)) {
+            return [];
         }
 
-        $list = [];
-        foreach (array_slice($items, 0, $maxItems) as $item) {
-            $text = $this->text($item, $maxLength);
-            if ($text !== '') {
-                $list[] = $text;
-            }
-        }
-
-        return $list;
+        return array_values(array_filter(array_map(
+            fn (mixed $item): string => $this->text($item, $maxLength),
+            array_slice(array_values($items), 0, $maxItems)
+        ), fn (string $item): bool => $item !== ''));
     }
 
     private function instructions(): string
     {
         return implode("\n", [
-            'أنت مُعِدّ تقييمات تقنية في منصة GoTraniee لطلاب الجامعات والخريجين. أنشئ أسئلة مفتوحة الإجابة فقط يكتب الطالب إجابتها بنفسه نصًا أو كودًا.',
-            'ممنوع تمامًا: الاختيار من متعدد، أو سرد خيارات مرقمة (أ/ب/ج أو A/B/C)، أو صح وخطأ، أو عبارات مثل "اختر الإجابة الصحيحة" أو "Which of the following".',
-            'التقييم جلسة واحدة للمهارات في skills، ولكل مهارة مستواها level الخاص بها حسب level_guidance. السياق هو المسار المهني specialization.',
-            'لكل مهارة أنشئ practical_questions سؤالًا عمليًا بالضبط: ضع skill_id حرفيًا، و difficulty = level تلك المهارة بالضبط، و type من practical_types الخاصة بها. السؤال العملي يقيس مهارته وحدها بمستواها، لا أسهل ولا أصعب.',
-            'الأنواع العملية للمهارات البرمجية: coding كتابة كود، debugging إيجاد الخطأ في code_context وإصلاحه بكود، sql كتابة استعلام، implementation تنفيذ جزء من ميزة أو أوامر، code_analysis تحليل سلوك أو مشكلة في code_context وشرحها. للمهارات غير البرمجية (programming = false): scenario موقف عملي يتطلب قرارًا وخطوات، design_task مهمة تصميم يصف الطالب حلها بالتفصيل، case_study تحليل حالة واقعية؛ لا تطلب منها كتابة كود.',
-            'ثم أنشئ written_questions سؤالًا كتابيًا واحدًا type = essay: مقال قصير يربط المهارات المختارة بموقف واحد حيث يكون ذلك منطقيًا (مثل قرار تصميم يشمل أكثر من مهارة). اترك skill_id و difficulty فارغين للمقال. في معايير المقال ضع لكل معيار skill_id للمهارة التي يقيّمها فعلًا؛ لا تضع معيارًا لمهارة لا يتيح المقال للطالب إظهارها.',
-            'debugging و code_analysis يجب أن تحتوي code_context على الكود المطلوب تحليله. لا تضع الحل في code_context. language: لغة الكود مثل php أو sql أو dart، أو فارغ.',
-            'المدة الإجمالية time_limit_minutes دقيقة لكل الأسئلة: اجعل كل سؤال قابلًا للإجابة بإجابة مركّزة ضمنها. اكتب نص السؤال بالعربية مع المصطلحات التقنية بالإنجليزية؛ قد يجيب الطالب بالعربية أو الإنجليزية.',
-            'إذا كانت requires_human_verification = true (مثل أدوات التصميم) فهي مهارة لا تُثبت بالكتابة: اطرح سيناريوهات ومهام يصف فيها الطالب قراراته وخطواته، ولا تطلب ملفات أو تنفيذًا فعليًا بالأداة.',
-            'avoid_questions أسئلة طُرحت على الطالب سابقًا: لا تكرر أيًا منها ولا تعِد صياغته بتغيير بسيط؛ اختر مواقف ومهام جديدة.',
-            'لكل سؤال معايير تصحيح خاصة: criteria من 1 إلى 6 معايير، لكل منها description يوضح ما يستحق الدرجة الكاملة والجزئية و points عدد صحيح من 1 إلى 10 و skill_id؛ reference_answer نموذج لإجابة صحيحة (وليس الإجابة الوحيدة المقبولة)؛ key_concepts المفاهيم الأساسية؛ common_mistakes الأخطاء الشائعة أو الحرجة؛ minimum_evidence الحد الأدنى الذي يجب أن تُظهره الإجابة لتُعد مقبولة.',
-            'لا تكشف الإجابة أو المعايير في نص السؤال. title عنوان قصير للتقييم. أعد JSON مطابقًا للمخطط فقط دون أي نص إضافي.',
+            'أنت مُعِدّ تقييمات برمجية في منصة GoTraniee لطلاب الجامعات والخريجين. أنشئ مهامًا برمجية عملية فقط: كل مهمة تطلب من الطالب أن يكتب كودًا أو يكمله أو يعدّله أو يصحح خطأ فيه.',
+            'ممنوع: الاختيار من متعدد، صح وخطأ، المقالات، وأي سؤال يمكن الإجابة عنه بشرح مفهوم دون كتابة كود.',
+            'لكل مهارة في skills أنشئ tasks مهمة بالضبط، بمستوى level حسب level_guidance، وضع skill_id حرفيًا. المجموع total_tasks مهمة.',
+            'المدة time_limit_minutes دقيقة لكل المهام: اجعل كل مهمة صغيرة ومحددة يمكن حلها بكود قصير خلالها.',
+            'لكل مهمة: title عنوان قصير؛ language لغة الكود أو الصياغة (مثل php أو javascript أو sql أو dart)؛ task نص المهمة بالعربية مع المصطلحات التقنية بالإنجليزية، يوضح ما يجب تنفيذه بالضبط؛ starter_code كود بداية أو الكود المطلوب تصحيحه عند الحاجة وإلا فارغ؛ requirements السلوك المطلوب والقيود في نقاط قصيرة؛ examples حتى 3 أمثلة input و output عند الفائدة.',
+            'reference_solution حل صحيح موجز (واحد من الحلول الممكنة). rubric من 2 إلى 4 معايير لكل منها description لما يستحق النقاط و points عدد صحيح من 1 إلى 10. لا تضع الحل أو المعايير في task أو starter_code.',
+            'avoid_tasks مهام طُرحت على الطالب سابقًا: لا تكرر أيًا منها. title للتقييم كله عنوان قصير. أعد JSON مطابقًا للمخطط فقط.',
         ]);
     }
 
-    private function schema(array $plan): array
+    private function schema(): array
     {
         $string = ['type' => 'STRING'];
-        $strings = ['type' => 'ARRAY', 'items' => $string];
-        $anyProgramming = in_array(true, array_column($plan, 'programming'), true);
-        $anyOther = in_array(false, array_column($plan, 'programming'), true);
-        $types = array_values(array_unique(array_merge(
-            $anyProgramming ? self::PROGRAMMING_PRACTICAL_TYPES : [],
-            $anyOther ? self::NON_PROGRAMMING_PRACTICAL_TYPES : [],
-            ['essay'],
-        )));
 
         return [
             'type' => 'OBJECT',
@@ -409,34 +375,37 @@ class AssessmentQuestionGenerator
                     'items' => [
                         'type' => 'OBJECT',
                         'properties' => [
-                            'skill_id' => ['type' => 'INTEGER', 'nullable' => true],
-                            'type' => ['type' => 'STRING', 'enum' => $types],
-                            'difficulty' => ['type' => 'STRING', 'enum' => SkillLevels::ALL, 'nullable' => true],
-                            'prompt' => $string,
-                            'code_context' => $string,
+                            'skill_id' => ['type' => 'INTEGER'],
+                            'title' => $string,
                             'language' => $string,
-                            'criteria' => [
+                            'task' => $string,
+                            'starter_code' => $string,
+                            'requirements' => ['type' => 'ARRAY', 'items' => $string],
+                            'examples' => [
+                                'type' => 'ARRAY',
+                                'items' => [
+                                    'type' => 'OBJECT',
+                                    'properties' => ['input' => $string, 'output' => $string],
+                                ],
+                            ],
+                            'reference_solution' => $string,
+                            'rubric' => [
                                 'type' => 'ARRAY',
                                 'items' => [
                                     'type' => 'OBJECT',
                                     'properties' => [
-                                        'skill_id' => ['type' => 'INTEGER'],
                                         'description' => $string,
                                         'points' => ['type' => 'INTEGER'],
                                     ],
-                                    'required' => ['skill_id', 'description', 'points'],
+                                    'required' => ['description', 'points'],
                                 ],
                             ],
-                            'reference_answer' => $string,
-                            'key_concepts' => $strings,
-                            'common_mistakes' => $strings,
-                            'minimum_evidence' => $string,
                         ],
-                        'required' => ['type', 'prompt', 'criteria', 'reference_answer', 'key_concepts', 'minimum_evidence'],
+                        'required' => ['skill_id', 'title', 'language', 'task', 'reference_solution', 'rubric'],
                     ],
                 ],
             ],
-            'required' => ['title', 'questions'],
+            'required' => ['questions'],
         ];
     }
 }

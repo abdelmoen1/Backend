@@ -12,7 +12,7 @@ use Illuminate\Support\Facades\Http;
 /**
  * Gemini وهمي لتقييمات المهارات: يميّز طلب التوليد من طلب التصحيح من تعليمات النظام، ويحفظ كل
  * الطلبات للتحقق مما أُرسل. التصحيح الافتراضي يعتمد على علامة في إجابة الطالب: FULL تمنح كل
- * النقاط، HALF نصفها، وغير ذلك "إجابة غير كافية".
+ * النقاط، HALF نصفها، وغير ذلك "لا حل".
  */
 trait FakesAssessmentGemini
 {
@@ -66,83 +66,62 @@ trait FakesAssessmentGemini
         ));
     }
 
-    protected const PROGRAMMING_TYPES = ['coding', 'debugging', 'sql', 'implementation', 'code_analysis'];
-
-    protected const NON_PROGRAMMING_TYPES = ['scenario', 'design_task', 'case_study'];
-
     /**
-     * جلسة مولدة صالحة: 9 أسئلة عملية موزعة على المهارات كما يوزعها الخادم + مقال واحد بمعيار لكل مهارة (5 نقاط).
-     * لكل سؤال عملي معياران (6 + 4 نقاط) لمهارته وقيم سرية يسهل البحث عنها. $variant يغيّر النصوص لمحاكاة مجموعة جديدة.
+     * جلسة مولدة صالحة: مهام برمجية موزعة على المهارات كما يوزعها الخادم (10 افتراضيًا). لكل مهمة معياران (6 + 4 نقاط)
+     * وحل مرجعي بقيمة سرية يسهل البحث عنها. $variant يغيّر النصوص لمحاكاة مجموعة جديدة.
      *
-     * @param  array<int, string|array{0: string, 1: bool}>  $skills  معرّف المهارة => المستوى، أو [المستوى، برمجية؟]، بترتيب الاختيار
+     * @param  array<int, string>  $skills  معرّف المهارة => المستوى، بترتيب الاختيار
      */
     protected function generatedAssessment(array $skills, string $variant = 'A'): array
     {
-        $distribution = AssessmentQuestionGenerator::practicalDistribution(count($skills), 9);
+        $distribution = AssessmentQuestionGenerator::practicalDistribution(count($skills), (int) config('assessments.questions.practical', 10));
         $questions = [];
         $number = 0;
         foreach (array_keys($skills) as $index => $skillId) {
-            [$level, $programming] = is_array($skills[$skillId]) ? $skills[$skillId] : [$skills[$skillId], true];
-            $types = $programming ? self::PROGRAMMING_TYPES : self::NON_PROGRAMMING_TYPES;
-            foreach (range(1, $distribution[$index]) as $count) {
+            $level = $skills[$skillId];
+            foreach (range(1, $distribution[$index]) as $_) {
                 $number++;
-                $type = $types[($count - 1) % count($types)];
                 $questions[] = [
                     'skill_id' => $skillId,
-                    'type' => $type,
-                    'difficulty' => $level,
-                    'prompt' => "سؤال {$type} رقم {$number} للمهارة {$skillId} بمستوى {$level} (مجموعة {$variant}).",
-                    'code_context' => in_array($type, ['debugging', 'code_analysis'], true) ? "<?php\n\$items = [1, 2];\necho \$items[2];" : '',
-                    'language' => $type === 'sql' ? 'sql' : ($programming ? 'php' : ''),
-                    'criteria' => [
-                        ['skill_id' => $skillId, 'description' => 'يشرح الفكرة الأساسية بدقة.', 'points' => 6],
-                        ['skill_id' => $skillId, 'description' => 'يذكر مثالًا صحيحًا.', 'points' => 4],
+                    'title' => "مهمة {$number}",
+                    'language' => 'php',
+                    'task' => "اكتب الدالة total رقم {$number} للمهارة {$skillId} بمستوى {$level} (مجموعة {$variant}) لتعيد مجموع عناصر المصفوفة.",
+                    'starter_code' => "function total(array \$items): int\n{\n    // TODO\n}",
+                    'requirements' => ['تعيد 0 للمصفوفة الفارغة.'],
+                    'examples' => [['input' => '[1, 2, 3]', 'output' => '6']],
+                    'reference_solution' => "SECRET-SOLUTION-{$skillId}-{$number}",
+                    'rubric' => [
+                        ['description' => 'SECRET-CRITERION يعيد المجموع الصحيح.', 'points' => 6],
+                        ['description' => 'SECRET-CRITERION يعالج المصفوفة الفارغة.', 'points' => 4],
                     ],
-                    'reference_answer' => "SECRET-REFERENCE-{$skillId}-{$number}",
-                    'key_concepts' => ['SECRET-CONCEPT'],
-                    'common_mistakes' => ['SECRET-MISTAKE'],
-                    'minimum_evidence' => 'SECRET-MINIMUM-EVIDENCE',
                 ];
             }
         }
 
-        $questions[] = [
-            'skill_id' => null,
-            'type' => 'essay',
-            'difficulty' => null,
-            'prompt' => "مقال يربط المهارات المختارة في قرار تصميم واحد (مجموعة {$variant}).",
-            'code_context' => '',
-            'language' => '',
-            'criteria' => array_map(fn (int $skillId): array => [
-                'skill_id' => $skillId,
-                'description' => "يوضح دور المهارة {$skillId} في القرار.",
-                'points' => 5,
-            ], array_keys($skills)),
-            'reference_answer' => 'SECRET-REFERENCE-ESSAY',
-            'key_concepts' => ['SECRET-CONCEPT'],
-            'common_mistakes' => ['SECRET-MISTAKE'],
-            'minimum_evidence' => 'SECRET-MINIMUM-EVIDENCE',
-        ];
-
         return ['title' => 'تقييم تجريبي', 'questions' => $questions];
     }
 
+    /** تصحيح وهمي بعلامة في إجابة الطالب: FULL كل النقاط، HALF نصفها، وغير ذلك "لا حل". */
     protected function markerGrade(array $payload): array
     {
         $answer = (string) $payload['student_answer'];
         $ratio = str_contains($answer, 'FULL') ? 1.0 : (str_contains($answer, 'HALF') ? 0.5 : 0.0);
 
         return [
-            'question_id' => $payload['question']['id'],
-            'status' => $ratio > 0 ? 'graded' : 'insufficient_answer',
+            'question_id' => $payload['task']['id'],
+            'verdict' => match (true) {
+                $ratio === 1.0 => 'correct',
+                $ratio > 0 => 'partially_correct',
+                default => 'no_solution',
+            },
             'criteria' => array_map(fn (array $criterion): array => [
                 'id' => $criterion['id'],
                 'awarded' => (int) floor($criterion['points'] * $ratio),
                 'justification' => 'مبرر',
             ], $payload['rubric']['criteria']),
-            'feedback' => 'ملاحظات المصحح على الإجابة.',
-            'evidence' => [mb_substr($answer, 0, 40)],
-            'missing_concepts' => $ratio < 1 ? ['مفهوم ناقص'] : [],
+            'issues' => $ratio < 1 ? ['لا يعالج المصفوفة الفارغة.'] : [],
+            'feedback' => 'ملاحظات المصحح على الحل.',
+            'reasoning' => 'تقييم موجز لصحة الحل وجودته.',
         ];
     }
 

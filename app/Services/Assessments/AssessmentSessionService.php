@@ -8,6 +8,7 @@ use App\Models\Skill;
 use App\Models\SkillAssessment;
 use App\Models\StudentProfile;
 use App\Services\Projects\SpecializationRoles;
+use App\Support\QueryFailure;
 use Illuminate\Database\QueryException;
 use Illuminate\Database\UniqueConstraintViolationException;
 use Illuminate\Support\Carbon;
@@ -18,8 +19,8 @@ use Illuminate\Support\Facades\Log;
 
 /**
  * جلسات التقييم المكتوب، كل جلسة لحتى 3 مهارات بمستوى يختاره الطالب لكل مهارة:
- * - البدء: يتطلب مسارًا مهنيًا ومستوى لكل مهارة؛ Gemini يولد 10 أسئلة جديدة للجلسة كاملة (9 عملية موزعة على
- *   المهارات، 3 على الأقل لكل مهارة، + مقال واحد بمعايير لكل مهارة) متجنبًا أسئلة الطالب السابقة، والجلسة تُنشأ
+ * - البدء: يتطلب مسارًا مهنيًا، ومهارات من ملف الطالب تُختبر بمهام برمجية، ومستوى لكل مهارة؛ Gemini يولد 10 مهام
+ *   برمجية جديدة للجلسة كاملة (موزعة على المهارات، 3 على الأقل لكل مهارة) متجنبًا مهام الطالب السابقة، والجلسة تُنشأ
  *   فقط بعد التحقق منها بنسخة مجمدة. جلسة مفتوحة واحدة لكل طالب: التحديث أو طلب البدء مجددًا يعيدها بالأسئلة
  *   والمستويات نفسها.
  * - إعادة المحاولة: مسموحة دائمًا، حتى بعد النجاح (مثل الانتقال لمستوى أعلى)، مع مهلة للمهارة والمستوى نفسيهما
@@ -56,6 +57,8 @@ class AssessmentSessionService
                 'selected' => in_array($skill->id, $selected, true),
                 'practical' => in_array($skill->id, $practical, true),
                 'programming' => ! in_array($skill->id, $nonProgramming, true),
+                // يظهر للاختيار ويقبله الخادم: مهارة في ملف الطالب تُختبر بمهام برمجية
+                'assessable' => in_array($skill->id, $selected, true) && ! in_array($skill->id, $nonProgramming, true),
             ] + $this->skillStatus($results->get($skill->id, collect()), $practical);
         })->all();
 
@@ -137,6 +140,24 @@ class AssessmentSessionService
         if ($skills->count() !== count($ids)) {
             throw new AssessmentException('إحدى المهارات المختارة غير موجودة في قائمة المنصة.', 'unknown_skill', 422);
         }
+        // تُقيَّم مهارات ملف الطالب فقط، والمهارات التي تُختبر بمهام برمجية فقط
+        $owned = $student->studentSkills()->whereIn('skill_id', $ids)->pluck('skill_id')->map(fn ($id): int => (int) $id)->all();
+        $notOwned = array_values(array_diff($ids, $owned));
+        if ($notOwned !== []) {
+            throw new AssessmentException(
+                'هذه المهارات ليست ضمن مهارات ملفك: '.implode('، ', array_map(fn (int $id): string => $skills->get($id)->name, $notOwned)).'. أضفها إلى ملفك أولًا ثم ابدأ التقييم.',
+                'skill_not_in_profile',
+                422
+            );
+        }
+        $notAssessable = array_values(array_intersect($ids, SkillVerification::nonProgrammingSkillIds()));
+        if ($notAssessable !== []) {
+            throw new AssessmentException(
+                'لا يمكن تقييم هذه المهارات بمهام برمجية في المنصة حاليًا: '.implode('، ', array_map(fn (int $id): string => $skills->get($id)->name, $notAssessable)).'.',
+                'skill_not_assessable',
+                422
+            );
+        }
 
         $mix = self::questionMix();
         $minimum = max(1, (int) config('assessments.min_practical_per_skill', 3));
@@ -177,8 +198,9 @@ class AssessmentSessionService
             );
         }
 
-        // التوليد قد يستغرق ثواني؛ القفل يمنع نقرتين متتاليتين من توليد محاولتين
-        $lock = Cache::lock("assessment-start:{$student->id}", 180);
+        // التوليد قد يستغرق دقيقة أو أكثر؛ القفل يمنع نقرتين أو إعادة محاولة من توليد محاولة موازية، ومدته تغطي أطول
+        // توليد ممكن (كل المحاولات بمهلتها الكاملة) فلا ينتهي القفل والطلب الأول ما زال يولد
+        $lock = Cache::lock("assessment-start:{$student->id}", self::startLockSeconds());
         if (! $lock->get()) {
             throw new AssessmentException('يجري إعداد تقييمك الآن. انتظر قليلًا ثم حدّث الصفحة.', 'session_starting', 409, retryable: true);
         }
@@ -187,7 +209,6 @@ class AssessmentSessionService
         $stage = 'prepare';
         try {
             $minutes = self::timeLimitMinutes();
-            $nonProgramming = SkillVerification::nonProgrammingSkillIds();
             $levels = [];
             $plan = [];
             foreach ($selections as $index => $item) {
@@ -196,8 +217,6 @@ class AssessmentSessionService
                 $plan[] = [
                     'skill' => $skill,
                     'level' => $item['level'],
-                    'programming' => ! in_array($skill->id, $nonProgramming, true),
-                    'human_verification' => in_array($skill->id, $practical, true),
                     'practical' => $distribution[$index],
                 ];
             }
@@ -206,14 +225,17 @@ class AssessmentSessionService
             $assessment = $this->generator->generate(
                 ['key' => $specialization['key'], 'label' => $specialization['label']],
                 $plan,
-                $mix['written'],
                 $minutes,
                 $previous,
+                $minimum,
             );
 
             $stage = 'persist';
 
-            return DB::transaction(function () use ($student, $ids, $levels, $plan, $assessment, $specialization, $mix, $minutes, $minimum, $previous): array {
+            // العدد الفعلي لكل مهارة بعد التحقق (قد يختلف عن الخطة حين تُكمل مهارة نقص أخرى)
+            $perSkill = array_map(fn (int $id): int => count(array_filter($assessment['questions'], fn (array $question): bool => $question['skill_id'] === $id)), $ids);
+
+            return DB::transaction(function () use ($student, $ids, $levels, $perSkill, $assessment, $specialization, $minutes, $minimum, $previous): array {
                 StudentProfile::query()->whereKey($student->id)->lockForUpdate()->first();
                 $open = $this->openSession($student);
                 if ($open) {
@@ -235,10 +257,10 @@ class AssessmentSessionService
                     'questions' => $assessment['questions'],
                     'question_count' => count($assessment['questions']),
                     'settings' => [
-                        'version' => 3,
+                        'version' => 4,
                         'levels' => $levels,
-                        'questions' => $mix,
-                        'practical_per_skill' => array_combine($ids, array_column($plan, 'practical')),
+                        'questions' => ['practical' => count($assessment['questions']), 'written' => 0],
+                        'practical_per_skill' => array_combine($ids, $perSkill),
                         'min_practical_per_skill' => $minimum,
                         'time_limit_minutes' => $minutes,
                         'skill_pass_percentage' => (int) config('assessments.skill_pass_percentage'),
@@ -252,17 +274,11 @@ class AssessmentSessionService
                         'model' => (string) config('services.gemini.model'),
                         'prompt_version' => AssessmentQuestionGenerator::PROMPT_VERSION,
                         'levels' => $levels,
-                        'programming' => array_combine($ids, array_column($plan, 'programming')),
                         'avoided_previous_questions' => count($previous),
                     ],
                     'started_at' => $now,
                     'expires_at' => $now->copy()->addMinutes($minutes),
                 ]);
-
-                // اختيار مهارة للتقييم إعلان ذاتي عنها؛ التحقق يبقى في skill_assessments وحدها
-                foreach ($ids as $skillId) {
-                    $student->studentSkills()->firstOrCreate(['skill_id' => $skillId]);
-                }
 
                 return [$session, true];
             });
@@ -274,13 +290,8 @@ class AssessmentSessionService
 
             throw $exception;
         } catch (QueryException $exception) {
-            // رسالة PDO (حالة SQL ونص الخطأ) دون الاستعلام وقيمه؛ المعاملة أُلغيت فلا جلسة ولا محاولة محتسبة
-            Log::error('Assessment start failed at the database.', [
-                'stage' => $stage,
-                'sqlstate' => (string) ($exception->errorInfo[0] ?? $exception->getCode()),
-                'driver_code' => $exception->errorInfo[1] ?? null,
-                'error' => mb_substr((string) ($exception->getPrevious()?->getMessage() ?? ''), 0, 300),
-            ]);
+            // حالة SQL ونص الخطأ دون الاستعلام وقيمه؛ المعاملة أُلغيت فلا جلسة ولا محاولة محتسبة
+            Log::error('Assessment start failed at the database.', ['stage' => $stage, ...QueryFailure::context($exception)]);
 
             throw new AssessmentException(
                 'تعذر حفظ التقييم بسبب خطأ في الخادم. لم يُنشأ أي تقييم ولم تُحتسب محاولة؛ حاول مرة أخرى بعد قليل.',
@@ -495,8 +506,15 @@ class AssessmentSessionService
                 'format' => $current['format'],
                 'language' => $current['language'],
                 'difficulty' => $current['difficulty'],
+                'title' => $current['title'] ?? null,
                 'prompt' => $current['prompt'],
-                'code_context' => $current['code_context'],
+                // كود البداية يُعرض في محرر الإجابة؛ code_context كود للقراءة في أسئلة الإصدارات السابقة
+                'starter_code' => $current['starter_code'] ?? '',
+                'code_context' => $current['code_context'] ?? '',
+                'requirements' => $current['requirements'] ?? [],
+                // أمثلة المدخلات والمخرجات جزء من نص المهمة؛ الحل المرجعي والمعايير لا تُرسل أبدًا
+                'examples' => $current['examples'] ?? [],
+                'max_points' => $current['max_points'],
             ] : null,
             'grading' => null,
             'results' => null,
@@ -597,6 +615,7 @@ class AssessmentSessionService
 
                         return [
                             'position' => $question['position'],
+                            'title' => $question['title'] ?? null,
                             'category' => $question['category'] ?? null,
                             'type' => $question['type'] ?? null,
                             'shared' => $shared,
@@ -607,6 +626,8 @@ class AssessmentSessionService
                                 ? ($answer?->grade_status === AssessmentSessionAnswer::GRADE_GRADED ? $points['awarded'] : null)
                                 : $answer?->awarded_points,
                             'max_points' => $shared ? $points['max'] : $question['max_points'],
+                            'verdict' => $answer?->grade['verdict'] ?? null,
+                            'issues' => $answer?->grade['issues'] ?? [],
                             'feedback' => $answer?->grade['feedback'] ?? null,
                             'missing_concepts' => $answer?->grade['missing_concepts'] ?? [],
                         ];
@@ -847,14 +868,23 @@ class AssessmentSessionService
     public static function questionMix(): array
     {
         return [
-            'practical' => max(1, (int) config('assessments.questions.practical', 9)),
-            'written' => max(0, (int) config('assessments.questions.written', 1)),
+            'practical' => max(1, (int) config('assessments.questions.practical', 10)),
+            'written' => max(0, (int) config('assessments.questions.written', 0)),
         ];
     }
 
     public static function timeLimitMinutes(): int
     {
         return max(5, (int) config('assessments.time_limit_minutes', 30));
+    }
+
+    /** أطول مدة ممكنة لطلب بدء واحد: محاولات التوليد × محاولات المزود × (المهلة + انتظار بينها)، مع هامش. */
+    public static function startLockSeconds(): int
+    {
+        return max(1, (int) config('assessments.generation_attempts', 2))
+            * max(1, (int) config('services.gemini.max_retries', 3))
+            * (max(1, (int) config('services.gemini.timeout', 60)) + 10)
+            + 30;
     }
 
     public static function maxSkills(): int
@@ -956,9 +986,8 @@ class AssessmentSessionService
         ];
     }
 
-    /** @return array<int, string> نصوص أسئلة سابقة للطالب في المهارة والمستوى نفسيهما، الأحدث أولًا */
     /**
-     * أسئلة سابقة للطالب: العملية للمهارة والمستوى نفسيهما (من مهارة السؤال وصعوبته المحفوظتين)، والمقالات السابقة.
+     * مهام سابقة للطالب للمهارة والمستوى نفسيهما (من مهارة السؤال وصعوبته المحفوظتين)، الأحدث أولًا.
      *
      * @param  array<int, string>  $levels  معرّف المهارة => المستوى المطلوب الآن
      */
@@ -975,9 +1004,6 @@ class AssessmentSessionService
             ->flatMap(fn (AssessmentSession $session): array => array_column(array_filter(
                 $session->questions ?? [],
                 function (array $question) use ($session, $levels): bool {
-                    if (($question['category'] ?? null) === AssessmentQuestionGenerator::CATEGORY_WRITTEN && ($question['skill_id'] ?? null) === null) {
-                        return true;
-                    }
                     $skillId = (int) ($question['skill_id'] ?? 0);
                     // أسئلة الإصدار الأول بلا difficulty محفوظ على مستوى الجلسة
                     $level = $question['difficulty'] ?? $session->requested_level;

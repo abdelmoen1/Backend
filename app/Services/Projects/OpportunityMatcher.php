@@ -326,8 +326,8 @@ class OpportunityMatcher
 
             return $verifiedElsewhere !== null
                 ? $this->reason(self::SKILL_NOT_SELECTED, $skill, "مهارة {$name} مثبتة لديك لكنها ليست ضمن مهارات ملفك. أضفها إلى ملفك لتُحتسب في هذا الدور.", ['type' => 'profile', 'label' => 'إضافة المهارة إلى ملفي'])
-                // بدء تقييم المهارة يضيفها إلى الملف تلقائيًا
-                : $this->reason(self::SKILL_NOT_SELECTED, $skill, "مهارة {$name} ليست ضمن مهارات ملفك بعد. ابدأ اختبار المهارة لإضافتها ومعرفة مدى توافقك مع هذه الفرصة.", $assess);
+                // التقييم يقبل مهارات الملف فقط: تُضاف المهارة إلى الملف أولًا ثم تُختبر
+                : $this->reason(self::SKILL_NOT_SELECTED, $skill, "مهارة {$name} ليست ضمن مهارات ملفك بعد. أضفها إلى ملفك ثم اختبرها لمعرفة مدى توافقك مع هذه الفرصة.", ['type' => 'profile', 'label' => 'إضافة المهارة إلى ملفي']);
         }
 
         if ($skill['verified_level'] === null) {

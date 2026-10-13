@@ -18,6 +18,25 @@ class GeminiProvider implements AIProvider
      */
     private const MAX_RETRY_DELAY_MS = 10000;
 
+    /**
+     * إعداد التفكير المشترك لكل ميزات Gemini (اكتشاف المشاريع وتقييم المهارات): GEMINI_THINKING_BUDGET إن ضُبط،
+     * وإلا صفر للنماذج المفكرة أو الكبيرة المعروفة حتى لا تبطؤ، ولا شيء لغيرها.
+     */
+    public static function thinkingConfig(): array
+    {
+        $configured = config('services.gemini.thinking_budget');
+        if ($configured !== null && $configured !== '') {
+            return ['thinkingBudget' => (int) $configured];
+        }
+
+        $model = (string) config('services.gemini.model');
+        if (preg_match('/(?:gemini-3\.5|thinking|pro)/i', $model) === 1) {
+            return ['thinkingBudget' => 0];
+        }
+
+        return [];
+    }
+
     public function generateResponse(array $payload): Response
     {
         $apiKey = config('services.gemini.api_key');
