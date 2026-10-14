@@ -526,25 +526,28 @@ class ProjectPublicationMatchingTest extends TestCase
             ->assertJsonPath('data.eligibility.status', OpportunityMatcher::LEVEL_INSUFFICIENT)
             ->assertJsonPath('data.eligibility.message', 'مستواك المثبت في Laravel هو مبتدئ، بينما يتطلب هذا الدور مستوى متوسطًا.');
 
-        // رسوب في المتوسط لا يغيّر شيئًا، ثم النجاح فيه يرفع المستوى ويؤهل للدور
+        // رسوب في المتوسط (بعد فترة انتظار المهارة) لا يغيّر شيئًا، ثم النجاح فيه يرفع المستوى ويؤهل للدور
+        $this->travel(8)->days();
         $this->completeAttempt($laravel, 'intermediate', 'weak', 'L2');
         $this->getJson("/api/student/opportunities/{$opportunity->id}")->assertJsonPath('data.eligibility.status', OpportunityMatcher::LEVEL_INSUFFICIENT);
-        $this->travel(25)->hours();
+        $this->travel(8)->days();
         $this->completeAttempt($laravel, 'intermediate', 'FULL', 'L3');
         $this->getJson("/api/student/opportunities/{$opportunity->id}")
             ->assertJsonPath('data.eligibility.status', OpportunityMatcher::ELIGIBLE)
             ->assertJsonPath('data.roles.1.requirements.0.verified_level', 'intermediate');
 
         // رسوب لاحق بمستوى مبتدئ لا يلغي المستوى المتوسط
-        $this->travel(25)->hours();
+        $this->travel(8)->days();
         $this->completeAttempt($laravel, 'beginner', 'weak', 'L4');
         $this->getJson("/api/student/opportunities/{$opportunity->id}")->assertJsonPath('data.eligibility.status', OpportunityMatcher::ELIGIBLE);
 
-        // إزالة المهارة من الملف توقف احتسابها فورًا، والفرصة تبقى ظاهرة مع السبب
-        $this->deleteJson("/api/student/skills/{$rest}")->assertOk();
+        // مهارة لها تقييم محفوظ لا تُحذف من الملف، فتبقى محتسبة
+        $this->deleteJson("/api/student/skills/{$rest}")
+            ->assertStatus(409)
+            ->assertJsonPath('code', 'skill_has_assessment');
         $this->getJson("/api/student/opportunities/{$opportunity->id}")
             ->assertOk()
-            ->assertJsonPath('data.eligibility.status', OpportunityMatcher::SKILL_NOT_SELECTED);
+            ->assertJsonPath('data.eligibility.status', OpportunityMatcher::ELIGIBLE);
     }
 
     public function test_expert_requirements_need_an_expert_pass_and_an_expert_pass_covers_lower_levels(): void

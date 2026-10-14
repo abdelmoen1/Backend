@@ -170,18 +170,23 @@ class AssessmentSessionService
             );
         }
 
-        $practical = SkillVerification::practicalSkillIds();
         $results = $this->resultsBySkill($student);
+        // فترة الانتظار لكل مهارة من نتائجها المحفوظة فقط (لا جلسة ولا Gemini)؛ الرفض يذكر المهارات المتأثرة وحدها
         $waiting = [];
         foreach ($selections as $item) {
-            $next = $this->skillStatus($results->get((int) $item['skill_id'], collect()), $practical)['levels'][$item['level']]['next_attempt_at'];
+            $next = $this->nextAttemptAt($results->get((int) $item['skill_id'], collect()));
             if ($next !== null) {
-                $waiting[] = ['skill' => $skills->get((int) $item['skill_id'])->name, 'level' => $item['level'], 'next_attempt_at' => $next];
+                $waiting[] = [
+                    'skill_id' => (int) $item['skill_id'],
+                    'skill' => $skills->get((int) $item['skill_id'])->name,
+                    'level' => $item['level'],
+                    'next_attempt_at' => $next,
+                ];
             }
         }
         if ($waiting !== []) {
             throw new AssessmentException(
-                'لا يمكن إعادة تقييم بعض المهارات بالمستوى نفسه قبل انتهاء مدة الانتظار. اختر مستوى آخر لها أو احذفها من هذا التقييم.',
+                'بعض المهارات المختارة قُيّمت مؤخرًا ولا يمكن إعادة تقييمها قبل انتهاء فترة الانتظار. احذفها من هذا التقييم أو قيّم مهارات أخرى.',
                 'retake_not_available',
                 409,
                 ['skills' => $waiting]
@@ -603,7 +608,7 @@ class AssessmentSessionService
                     && SkillVerification::counts($result, $practical),
                 'needs_human_verification' => $isPractical,
                 'next_attempt_at' => $graded
-                    ? $result->assessed_at->copy()->addHours((int) $session->settings['retake_after_hours'])->toIso8601String()
+                    ? $result->assessed_at->copy()->addHours(self::retakeAfterHours())->toIso8601String()
                     : null,
                 // أسئلة المهارة العملية، والمقال إن كانت له معايير لهذه المهارة (بنقاط معاييرها هي فقط)
                 'questions' => collect($session->questions)
@@ -904,7 +909,8 @@ class AssessmentSessionService
     }
 
     /**
-     * حالة المهارة للطالب: أعلى مستوى مُثبت (لا يخفضه رسوب لاحق)، وحالة كل مستوى ومهلة إعادته.
+     * حالة المهارة للطالب: أعلى مستوى مُثبت (لا يخفضه رسوب لاحق)، وحالة كل مستوى، وأحدث تقييم مكتمل محفوظ،
+     * وفترة انتظار المهارة (تشمل كل مستوياتها).
      *
      * @param  Collection<int, SkillAssessment>  $results  الأحدث أولًا
      */
@@ -913,13 +919,14 @@ class AssessmentSessionService
         $verified = SkillVerification::highestLevel($results, $practical);
         $passed = $results->firstWhere('status', SkillAssessment::STATUS_PASSED);
         $latest = $results->first();
+        $completed = $results->first(fn (SkillAssessment $result): bool => in_array($result->status, SkillAssessment::COMPLETED_STATUSES, true));
+        $next = $this->nextAttemptAt($results);
 
         $levels = [];
         foreach (SkillLevels::ALL as $level) {
             $atLevel = $results->filter(fn (SkillAssessment $result): bool => SkillVerification::levelOf($result) === $level)->values();
             $levelPassed = $atLevel->firstWhere('status', SkillAssessment::STATUS_PASSED);
             $levelLatest = $atLevel->first();
-            $next = $this->nextAttemptAt($atLevel);
             $levels[$level] = [
                 'level' => $level,
                 'label' => SkillLevels::LABELS[$level],
@@ -941,22 +948,39 @@ class AssessmentSessionService
             'source' => ($passed ?? $latest)?->source,
             'assessed_at' => ($passed ?? $latest)?->assessed_at?->toIso8601String(),
             'levels' => $levels,
-            'can_assess' => collect($levels)->contains('can_assess', true),
+            // أحدث تقييم مكتمل محفوظ (المستوى المطلوب والدرجة منفصلان)؛ ملاحظات مهامه في جلسته assessment_session_id
+            'latest_assessment' => $completed ? [
+                'assessment_session_id' => $completed->assessment_session_id,
+                'status' => $completed->status,
+                'level' => SkillVerification::levelOf($completed),
+                'level_label' => SkillLevels::label(SkillVerification::levelOf($completed)),
+                'score' => $completed->score,
+                'reason' => $completed->notes,
+                'source' => $completed->source,
+                'assessed_at' => $completed->assessed_at?->toIso8601String(),
+            ] : null,
+            'next_attempt_at' => $next,
+            'can_assess' => $next === null,
         ];
     }
 
-    /** مهلة إعادة المهارة بالمستوى نفسه بعد آخر محاولة مكتملة التصحيح (ناجحة أو راسبة). */
-    private function nextAttemptAt(Collection $resultsAtLevel): ?string
+    /** نهاية فترة انتظار المهارة: من وقت اكتمال آخر تقييم لها مكتمل التصحيح (ناجح أو راسب) بأي مستوى. */
+    private function nextAttemptAt(Collection $results): ?string
     {
-        $last = $resultsAtLevel->first(fn (SkillAssessment $result): bool => $result->source === SkillAssessment::SOURCE_AI_WRITTEN
-            && in_array($result->status, [SkillAssessment::STATUS_PASSED, SkillAssessment::STATUS_FAILED], true));
+        $last = $results->first(fn (SkillAssessment $result): bool => $result->source === SkillAssessment::SOURCE_AI_WRITTEN
+            && in_array($result->status, SkillAssessment::COMPLETED_STATUSES, true));
         if (! $last) {
             return null;
         }
 
-        $next = $last->assessed_at->copy()->addHours((int) config('assessments.retake_after_hours', 24));
+        $next = $last->assessed_at->copy()->addHours(self::retakeAfterHours());
 
         return $next->isFuture() ? $next->toIso8601String() : null;
+    }
+
+    public static function retakeAfterHours(): int
+    {
+        return max(0, (int) config('assessments.retake_after_hours', 7 * 24));
     }
 
     /**

@@ -15,6 +15,8 @@ use Illuminate\Database\Eloquent\Relations\BelongsTo;
  * هو أعلى مستوى ناجح يُحتسب، فلا يخفضه رسوب لاحق بأي مستوى. النتائج السابقة لإضافة المستويات تُعد "مبتدئ".
  *
  * incomplete: تعذر تصحيح إحدى إجابات المهارة (خلل في الذكاء الاصطناعي وليس أداء الطالب)؛ لا نجاح ولا مهلة إعادة.
+ *
+ * أحدث نتيجة مكتملة لكل مهارة تُعرض في نظرة التقييم (latest_assessment)، وملاحظات مهامها في الجلسة المرتبطة بها.
  */
 class SkillAssessment extends Model
 {
@@ -25,6 +27,9 @@ class SkillAssessment extends Model
     public const STATUS_INCOMPLETE = 'incomplete';
 
     public const STATUSES = [self::STATUS_PASSED, self::STATUS_FAILED, self::STATUS_INCOMPLETE];
+
+    /** نتيجة تقييم مكتملة التصحيح: تبدأ فترة انتظار المهارة وتمنع حذفها من ملف الطالب */
+    public const COMPLETED_STATUSES = [self::STATUS_PASSED, self::STATUS_FAILED];
 
     /** اختبار الاختيار من متعدد القديم (لم يعد مسار التقييم) */
     public const SOURCE_PLATFORM_TEST = 'platform_test';

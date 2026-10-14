@@ -7,6 +7,7 @@ use App\Http\Requests\AddStudentSkillRequest;
 use App\Http\Requests\UpdateStudentSkillRequest;
 use App\Http\Resources\StudentSkillResource;
 use App\Models\Skill;
+use App\Models\SkillAssessment;
 use App\Models\StudentSkill;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -20,6 +21,14 @@ class StudentSkillController extends Controller
         $skills = $studentProfile->studentSkills()
             ->with('skill')
             ->get();
+
+        // المهارات ذات التقييم المكتمل لا تُحذف من الملف؛ الواجهة تعطل زر حذفها
+        $assessed = $studentProfile->skillAssessments()
+            ->whereIn('status', SkillAssessment::COMPLETED_STATUSES)
+            ->pluck('skill_id')
+            ->map(fn ($id): int => (int) $id)
+            ->all();
+        $skills->each(fn (StudentSkill $studentSkill) => $studentSkill->setAttribute('has_assessment', in_array((int) $studentSkill->skill_id, $assessed, true)));
 
         return response()->json([
             'success' => true,
@@ -106,6 +115,20 @@ class StudentSkillController extends Controller
                 'success' => false,
                 'message' => 'Skill not found in student profile.',
             ], 404);
+        }
+
+        // مهارة لها تقييم مكتمل محفوظ تبقى في الملف حتى يبقى سجلها ونتيجتها مرتبطين بها
+        $assessed = $studentProfile->skillAssessments()
+            ->where('skill_id', $skill->id)
+            ->whereIn('status', SkillAssessment::COMPLETED_STATUSES)
+            ->exists();
+        if ($assessed) {
+            return response()->json([
+                'success' => false,
+                'code' => 'skill_has_assessment',
+                'message' => "لا يمكن حذف مهارة {$skill->name} من ملفك لأن لها سجل تقييم محفوظ.",
+                'skill' => ['id' => $skill->id, 'name' => $skill->name],
+            ], 409);
         }
 
         $studentProfile->studentSkills()

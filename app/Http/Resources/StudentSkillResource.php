@@ -13,6 +13,7 @@ class StudentSkillResource extends JsonResource
             'student_profile_id' => $this->student_profile_id,
             'skill_id' => $this->skill_id,
             'proficiency' => $this->proficiency,
+            'has_assessment' => $this->whenHas('has_assessment'),
             'skill' => $this->whenLoaded('skill', fn () => [
                 'id' => $this->skill->id,
                 'name' => $this->skill->name,

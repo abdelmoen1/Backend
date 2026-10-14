@@ -653,7 +653,7 @@ class FreeResponseAssessmentTest extends TestCase
         $this->assertCount(5, $this->geminiRequestsOf('grading'));
     }
 
-    public function test_retakes_use_new_tasks_upgrade_to_expert_and_never_downgrade(): void
+    public function test_retakes_wait_seven_days_use_new_tasks_upgrade_to_expert_and_never_downgrade(): void
     {
         $student = $this->student('retake@example.test');
         $this->actingAs($student, 'sanctum');
@@ -662,17 +662,19 @@ class FreeResponseAssessmentTest extends TestCase
         $this->completeAttempt(['PHP' => 'beginner'], array_fill(0, 10, 'FULL'), 'A')
             ->assertJsonPath('data.results.0.verified_level', 'beginner');
 
-        // المستوى نفسه ينتظر المهلة؛ الرفض يذكر الزوج المتأثر فقط، ولا توليد
-        $this->fakeGemini($this->generated(['PHP' => 'beginner', 'Laravel' => 'beginner'], 'X'));
-        $this->postJson('/api/student/assessment-sessions', $this->payload(['PHP' => 'beginner', 'Laravel' => 'beginner']))
+        // فترة الانتظار تشمل كل مستويات المهارة؛ الرفض يذكر المهارة المتأثرة فقط، ولا توليد
+        $this->fakeGemini($this->generated(['PHP' => 'expert', 'Laravel' => 'beginner'], 'X'));
+        $this->postJson('/api/student/assessment-sessions', $this->payload(['PHP' => 'expert', 'Laravel' => 'beginner']))
             ->assertStatus(409)
             ->assertJsonPath('code', 'retake_not_available')
             ->assertJsonCount(1, 'skills')
+            ->assertJsonPath('skills.0.skill_id', $this->skills['PHP'])
             ->assertJsonPath('skills.0.skill', 'PHP')
-            ->assertJsonPath('skills.0.level', 'beginner');
+            ->assertJsonPath('skills.0.level', 'expert');
         Http::assertNothingSent();
 
-        // مستوى خبير مباشرة؛ الرسوب لا يخفض المستوى المثبت
+        // بعد 7 أيام: مستوى خبير مباشرة؛ الرسوب لا يخفض المستوى المثبت
+        $this->travel(7)->days();
         $this->completeAttempt(['PHP' => 'expert'], array_fill(0, 10, 'weak'), 'B')
             ->assertJsonPath('data.results.0.status', SkillAssessment::STATUS_FAILED)
             ->assertJsonPath('data.results.0.level', 'expert')
@@ -683,7 +685,7 @@ class FreeResponseAssessmentTest extends TestCase
             ->assertJsonPath("{$php}.levels.expert.can_assess", false);
 
         // بعد المهلة: مهام جديدة، وGemini يُبلَّغ بالمهام السابقة لهذا المستوى (لا مستويات أخرى)
-        $this->travel(25)->hours();
+        $this->travel(7)->days();
         $earlier = AssessmentSession::query()->orderBy('id')->get()->map(fn (AssessmentSession $session): array => $session->questions);
         $this->completeAttempt(['PHP' => 'expert'], array_fill(0, 10, 'FULL'), 'C')
             ->assertJsonPath('data.results.0.status', SkillAssessment::STATUS_PASSED)
@@ -693,6 +695,7 @@ class FreeResponseAssessmentTest extends TestCase
         $this->assertEmpty(array_intersect(array_column($earlier[0], 'prompt'), $avoid));
 
         // رسوب لاحق بمستوى أدنى أو من الإدارة لا يلغي مستوى الخبير
+        $this->travel(7)->days();
         $this->completeAttempt(['PHP' => 'advanced'], array_fill(0, 10, 'weak'), 'D');
         $this->artisan('skills:record-assessment', ['email' => 'retake@example.test', 'skill' => 'PHP', '--failed' => true, '--level' => 'expert'])->assertSuccessful();
         $this->getJson('/api/student/assessments')
@@ -709,7 +712,7 @@ class FreeResponseAssessmentTest extends TestCase
         $student = $this->student('duplicate@example.test');
         $this->actingAs($student, 'sanctum');
         $this->completeAttempt(['PHP' => 'intermediate'], array_fill(0, 10, 'weak'), 'A');
-        $this->travel(25)->hours();
+        $this->travel(7)->days();
 
         // مهمة مكررة حرفيًا (بعد توحيد المسافات والحالة) تُستبعد، فلا يكتمل العدد ويُعاد التوليد مرة
         $repeat = $this->generated(['PHP' => 'intermediate'], 'A');
@@ -717,6 +720,149 @@ class FreeResponseAssessmentTest extends TestCase
         $this->fakeGemini(fn (int $attempt): array => $attempt === 1 ? $repeat : $this->generated(['PHP' => 'intermediate'], 'B'));
         $this->postJson('/api/student/assessment-sessions', $this->payload(['PHP' => 'intermediate']))->assertCreated();
         $this->assertCount(2, $this->geminiRequestsOf('generation'));
+    }
+
+    public function test_each_skill_result_is_saved_and_the_latest_stays_available_without_new_ai_calls(): void
+    {
+        $student = $this->student('saved@example.test');
+        $this->actingAs($student, 'sanctum');
+        [$php, $laravel] = ['data.skills.'.$this->skillIndex('PHP'), 'data.skills.'.$this->skillIndex('Laravel')];
+
+        // PHP متقدم ممتاز، Laravel مبتدئ نصف الدرجة: لكل مهارة نتيجتها ومستواها المطلوب وحدها
+        $sessionId = $this->completeAttempt(['PHP' => 'advanced', 'Laravel' => 'beginner'], [...array_fill(0, 5, 'FULL'), ...array_fill(0, 5, 'HALF')])
+            ->json('data.id');
+        $completedAt = AssessmentSession::query()->findOrFail($sessionId)->completed_at->toIso8601String();
+        $this->assertSame(
+            [[$this->skills['PHP'], 'passed', 'advanced', 100], [$this->skills['Laravel'], 'failed', 'beginner', 50]],
+            SkillAssessment::query()->orderBy('id')->get()->map(fn (SkillAssessment $result): array => [$result->skill_id, $result->status, $result->level, $result->score])->all()
+        );
+
+        // صفحة جديدة أو دخول جديد: النتائج من قاعدة البيانات فقط، دون أي طلب إلى Gemini
+        $this->fakeGemini([]);
+        $this->app['auth']->forgetGuards();
+        $this->withToken($student->createToken('again')->plainTextToken)
+            ->getJson('/api/student/assessments')
+            ->assertOk()
+            ->assertJsonPath("{$php}.latest_assessment.assessment_session_id", $sessionId)
+            ->assertJsonPath("{$php}.latest_assessment.status", SkillAssessment::STATUS_PASSED)
+            ->assertJsonPath("{$php}.latest_assessment.level", 'advanced')
+            ->assertJsonPath("{$php}.latest_assessment.score", 100)
+            ->assertJsonPath("{$php}.latest_assessment.assessed_at", $completedAt)
+            ->assertJsonPath("{$laravel}.latest_assessment.status", SkillAssessment::STATUS_FAILED)
+            ->assertJsonPath("{$laravel}.latest_assessment.level", 'beginner')
+            ->assertJsonPath("{$laravel}.latest_assessment.score", 50)
+            ->assertJsonPath("{$laravel}.latest_assessment.reason", 'below_threshold')
+            ->assertJsonPath('data.skills.'.$this->skillIndex('MySQL').'.latest_assessment', null);
+        // ملاحظات المصحح محفوظة في جلسة النتيجة
+        $this->getJson("/api/student/assessment-sessions/{$sessionId}")
+            ->assertJsonPath('data.results.1.skill.name', 'Laravel')
+            ->assertJsonPath('data.results.1.questions.0.issues', ['لا يعالج المصفوفة الفارغة.'])
+            ->assertJsonPath('data.results.0.questions.0.feedback', 'ملاحظات المصحح على الحل.');
+        Http::assertNothingSent();
+    }
+
+    public function test_the_cooldown_is_per_skill_counts_from_completion_and_ends_after_seven_days(): void
+    {
+        $student = $this->student('cooldown@example.test');
+        $this->actingAs($student, 'sanctum');
+        $index = fn (string $name): string => 'data.skills.'.$this->skillIndex($name);
+
+        // PHP: اكتمل بعد 20 دقيقة من البدء؛ الانتظار يُحسب من الاكتمال
+        $this->travel(61)->seconds();
+        $this->fakeGemini($this->generated(['PHP' => 'beginner']));
+        $first = $this->postJson('/api/student/assessment-sessions', $this->payload(['PHP' => 'beginner']))->assertCreated()->json('data.id');
+        $this->answerAll($first, array_fill(0, 10, 'FULL'));
+        $this->travel(20)->minutes();
+        $this->postJson("/api/student/assessment-sessions/{$first}/finalize")->assertJsonPath('data.status', AssessmentSession::STATUS_COMPLETED);
+        $phpDone = SkillAssessment::query()->where('skill_id', $this->skills['PHP'])->sole()->assessed_at;
+        $this->assertTrue($phpDone->gte(AssessmentSession::query()->findOrFail($first)->created_at->copy()->addMinutes(20)));
+        $phpNext = $phpDone->copy()->addDays(7)->toIso8601String();
+
+        // Laravel بعد 3 أيام في جلسة أخرى: انتظاره مستقل
+        $this->travel(3)->days();
+        $this->completeAttempt(['Laravel' => 'intermediate'], array_fill(0, 10, 'weak'), 'B');
+        $laravelNext = SkillAssessment::query()->where('skill_id', $this->skills['Laravel'])->sole()->assessed_at->copy()->addDays(7)->toIso8601String();
+
+        $this->getJson('/api/student/assessments')
+            ->assertJsonPath($index('PHP').'.can_assess', false)
+            ->assertJsonPath($index('PHP').'.next_attempt_at', $phpNext)
+            ->assertJsonPath($index('PHP').'.levels.expert.can_assess', false)
+            ->assertJsonPath($index('Laravel').'.next_attempt_at', $laravelNext)
+            ->assertJsonPath($index('MySQL').'.can_assess', true)
+            ->assertJsonPath($index('MySQL').'.next_attempt_at', null);
+
+        // قبل نهاية الانتظار بدقيقة: رفض منظم للمهارة المتأثرة وحدها، بلا جلسة ولا Gemini
+        $this->travelTo($phpDone->copy()->addDays(7)->subMinute());
+        $this->fakeGemini($this->generated(['PHP' => 'expert', 'MySQL' => 'beginner'], 'X'));
+        $sessions = AssessmentSession::query()->count();
+        $this->postJson('/api/student/assessment-sessions', $this->payload(['PHP' => 'expert', 'MySQL' => 'beginner']))
+            ->assertStatus(409)
+            ->assertJsonPath('code', 'retake_not_available')
+            ->assertJsonPath('skills', [['skill_id' => $this->skills['PHP'], 'skill' => 'PHP', 'level' => 'expert', 'next_attempt_at' => $phpNext]]);
+        Http::assertNothingSent();
+        $this->assertSame($sessions, AssessmentSession::query()->count());
+
+        // بعد 7 أيام من اكتمال PHP: تُقيَّم مجددًا، وLaravel ما زال ينتظر، وMySQL متاحة طوال الوقت
+        $this->travel(2)->minutes();
+        $this->completeAttempt(['PHP' => 'expert', 'MySQL' => 'beginner'], array_fill(0, 10, 'FULL'), 'C');
+        $this->postJson('/api/student/assessment-sessions', $this->payload(['Laravel' => 'advanced']))
+            ->assertStatus(409)
+            ->assertJsonPath('skills.0.next_attempt_at', $laravelNext);
+    }
+
+    public function test_an_unfinished_or_ungradable_assessment_starts_no_cooldown(): void
+    {
+        $this->fakeGemini($this->generated(['PHP' => 'beginner']));
+        $student = $this->student('unfinished@example.test');
+        $sessionId = $this->start($student, ['PHP' => 'beginner']);
+        $this->answerAll($sessionId, array_fill(0, 4, 'FULL'));
+
+        $php = 'data.skills.'.$this->skillIndex('PHP');
+        $this->getJson('/api/student/assessments')
+            ->assertJsonPath("{$php}.can_assess", true)
+            ->assertJsonPath("{$php}.next_attempt_at", null)
+            ->assertJsonPath("{$php}.latest_assessment", null);
+        $this->assertSame(0, SkillAssessment::query()->count());
+
+        // نتيجة تعذر تصحيحها (incomplete) محفوظة لكنها لا تبدأ انتظارًا ولا تُعد تقييمًا مكتملًا
+        SkillAssessment::query()->create([
+            'student_profile_id' => $student->studentProfile->id,
+            'skill_id' => $this->skills['Laravel'],
+            'status' => SkillAssessment::STATUS_INCOMPLETE,
+            'level' => 'beginner',
+            'source' => SkillAssessment::SOURCE_AI_WRITTEN,
+            'notes' => 'grading_unavailable',
+            'assessed_at' => now(),
+        ]);
+        $laravel = 'data.skills.'.$this->skillIndex('Laravel');
+        $this->getJson('/api/student/assessments')
+            ->assertJsonPath("{$laravel}.can_assess", true)
+            ->assertJsonPath("{$laravel}.latest_assessment", null);
+        $this->deleteJson("/api/student/skills/{$this->skills['Laravel']}")->assertOk();
+    }
+
+    public function test_a_skill_with_a_saved_assessment_cannot_be_removed_from_the_profile(): void
+    {
+        $student = $this->student('keep@example.test');
+        $this->actingAs($student, 'sanctum');
+        $this->completeAttempt(['PHP' => 'beginner'], array_fill(0, 10, 'weak'))
+            ->assertJsonPath('data.results.0.status', SkillAssessment::STATUS_FAILED);
+
+        $listed = collect($this->getJson('/api/student/skills')->assertOk()->json('data'))->keyBy('skill_id');
+        $this->assertTrue($listed[$this->skills['PHP']]['has_assessment']);
+        $this->assertFalse($listed[$this->skills['MySQL']]['has_assessment']);
+
+        $this->deleteJson("/api/student/skills/{$this->skills['PHP']}")
+            ->assertStatus(409)
+            ->assertJsonPath('code', 'skill_has_assessment')
+            ->assertJsonPath('skill.id', $this->skills['PHP'])
+            ->assertJsonPath('message', 'لا يمكن حذف مهارة PHP من ملفك لأن لها سجل تقييم محفوظ.');
+        $this->assertTrue($student->studentProfile->studentSkills()->where('skill_id', $this->skills['PHP'])->exists());
+        $this->assertSame(1, SkillAssessment::query()->count());
+
+        // مهارة لم تُقيَّم تُحذف كما كانت
+        $this->deleteJson("/api/student/skills/{$this->skills['MySQL']}")->assertOk();
+        $this->assertFalse($student->studentProfile->studentSkills()->where('skill_id', $this->skills['MySQL'])->exists());
     }
 
     public function test_new_sessions_are_limited_per_day(): void

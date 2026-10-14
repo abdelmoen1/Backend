@@ -6,6 +6,7 @@ use App\Http\Controllers\Controller;
 use App\Http\Requests\CompleteStudentOnboardingRequest;
 use App\Http\Requests\UpdateStudentProfileRequest;
 use App\Http\Resources\StudentProfileResource;
+use App\Models\SkillAssessment;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
@@ -148,8 +149,10 @@ class StudentProfileController extends Controller
 
             // قبل الإكمال تمثل المهارات المحفوظة محاولات إكمال سابقة فتُضبط على الاختيار الحالي؛
             // بعده لا تُحذف مهارات أضافها الطالب من ملفه
+            // ولا تُحذف أبدًا مهارة لها تقييم مكتمل محفوظ
             if (! $studentProfile->onboarding_completed) {
-                $studentProfile->studentSkills()->whereNotIn('skill_id', $skillIds)->delete();
+                $assessed = $studentProfile->skillAssessments()->whereIn('status', SkillAssessment::COMPLETED_STATUSES)->pluck('skill_id');
+                $studentProfile->studentSkills()->whereNotIn('skill_id', $skillIds)->whereNotIn('skill_id', $assessed)->delete();
             }
 
             $existing = $studentProfile->studentSkills()->pluck('skill_id')->map(fn ($id): int => (int) $id);
