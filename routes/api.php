@@ -5,7 +5,9 @@ use App\Http\Controllers\Api\OrganizationProfileController;
 use App\Http\Controllers\Api\ProfileImageController;
 use App\Http\Controllers\Api\ProjectDiscoveryController;
 use App\Http\Controllers\Api\ProjectRequestController;
+use App\Http\Controllers\Api\ProjectTeamController;
 use App\Http\Controllers\Api\SkillController;
+use App\Http\Controllers\Api\StudentApplicationController;
 use App\Http\Controllers\Api\StudentAssessmentController;
 use App\Http\Controllers\Api\StudentOpportunityController;
 use App\Http\Controllers\Api\StudentProfileController;
@@ -56,9 +58,28 @@ Route::middleware('auth:sanctum')->group(function () {
         });
     });
 
-    // فرص المشاريع: الخادم يعيد فقط المشاريع المنشورة التي يطابق الطالب أحد أدوارها
+    // فرص المشاريع المنشورة المفتوحة للتقديم مع أهلية الطالب لكل دور. /opportunities هو مسار مواصفة Sprint 4
+    // و /student/opportunities المسار الأصلي؛ كلاهما للطلاب فقط وبالاستجابة نفسها
     Route::get('/student/opportunities', [StudentOpportunityController::class, 'index']);
     Route::get('/student/opportunities/{opportunity}', [StudentOpportunityController::class, 'show'])->whereNumber('opportunity');
+    Route::get('/opportunities', [StudentOpportunityController::class, 'index']);
+    Route::get('/opportunities/{opportunity}', [StudentOpportunityController::class, 'show'])->whereNumber('opportunity');
+
+    // طلبات الانضمام: الطالب يقدّم ويسحب لنفسه فقط
+    Route::middleware('throttle:applications')->group(function () {
+        Route::post('/opportunities/{opportunity}/applications', [StudentApplicationController::class, 'store'])->whereNumber('opportunity');
+        Route::post('/student/applications/{application}/withdraw', [StudentApplicationController::class, 'withdraw'])->whereNumber('application');
+    });
+    Route::get('/student/applications', [StudentApplicationController::class, 'index']);
+
+    // المطابقة وتكوين الفريق: للمؤسسة صاحبة المشروع فقط (تحقق الملكية في المتحكم)
+    Route::get('/projects/{project}/matches', [ProjectTeamController::class, 'matches'])->whereNumber('project');
+    Route::patch('/projects/{project}', [ProjectTeamController::class, 'update'])->whereNumber('project');
+    Route::patch('/projects/{project}/applications/{application}', [ProjectTeamController::class, 'reviewApplication'])->whereNumber(['project', 'application']);
+    Route::get('/projects/{project}/team', [ProjectTeamController::class, 'showTeam'])->whereNumber('project');
+    Route::post('/projects/{project}/team', [ProjectTeamController::class, 'storeTeam'])->whereNumber('project');
+    Route::post('/teams/{team}/leader', [ProjectTeamController::class, 'assignLeader'])->whereNumber('team');
+    Route::post('/teams/{team}/confirm', [ProjectTeamController::class, 'confirmTeam'])->whereNumber('team');
 
     Route::get('/organization/onboarding', [OrganizationProfileController::class, 'show']);
     Route::patch('/organization/onboarding', [OrganizationProfileController::class, 'update']);

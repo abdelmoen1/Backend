@@ -27,6 +27,7 @@ class StudentProfileResource extends JsonResource
             'phone' => $this->phone,
             'linkedin_url' => $this->linkedin_url,
             'github_url' => $this->github_url,
+            'weekly_availability_hours' => $this->weekly_availability_hours,
             'image_path' => $this->image_path,
             'image_url' => $this->image_path
                 ? route('api.profile-images.student', [

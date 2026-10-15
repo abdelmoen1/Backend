@@ -228,9 +228,12 @@ class ProjectPublicationMatchingTest extends TestCase
             // التقييم يقبل مهارات الملف فقط، فالخطوة التالية إضافة المهارة إلى الملف
             ->assertJsonPath('data.roles.0.eligibility.reasons.0.action.type', 'profile')
             ->assertJsonPath('data.scope.functional_scope.0.group', 'المواعيد')
-            ->assertJsonPath('data.organization.name', 'Clinic');
+            ->assertJsonPath('data.organization.name', 'Clinic')
+            // التقديم متاح الآن (Sprint 4)، لكن الطالب لم يقدّم فلا يُعرض له طلب
+            ->assertJsonPath('data.application', null)
+            ->assertJsonPath('data.accepting_applications', true);
         $body = $detail->getContent();
-        foreach (['estimated_cost', 'operational_cost', 'payment_schedule', 'budget_range', 'تقدير مبدئي', 'SECRET-BUDGET', 'rationale', 'revision_note', 'key_requirements', 'needs_confirmation', 'applied', 'application'] as $private) {
+        foreach (['estimated_cost', 'operational_cost', 'payment_schedule', 'budget_range', 'تقدير مبدئي', 'SECRET-BUDGET', 'rationale', 'revision_note', 'key_requirements', 'needs_confirmation', 'applied_at', 'pending'] as $private) {
             $this->assertStringNotContainsString($private, $body);
         }
     }

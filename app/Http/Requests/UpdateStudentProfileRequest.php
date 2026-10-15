@@ -53,6 +53,9 @@ class UpdateStudentProfileRequest extends FormRequest
             ],
 
             // التخصص من جدول specializations (SpecializationSeeder)
+            // ساعات التفرغ الأسبوعية للمشاريع؛ مدخل "التوفر" في مطابقة المرشحين
+            'weekly_availability_hours' => ['sometimes', 'nullable', 'integer', 'min:1', 'max:60'],
+
             'professional_specialization' => [
                 'sometimes',
                 'nullable',

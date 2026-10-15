@@ -5,6 +5,7 @@ namespace App\Models;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use Illuminate\Database\Eloquent\Relations\HasMany;
 
 /** المشروع المنشور للطلاب. واحد لكل طلب مشروع؛ إعادة الاعتماد تحدّث النسخة النشطة فقط. */
 class ProjectOpportunity extends Model
@@ -17,16 +18,59 @@ class ProjectOpportunity extends Model
 
     public const STATUSES = [self::STATUS_PUBLISHED, self::STATUS_SUSPENDED, self::STATUS_WITHDRAWN];
 
+    /*
+     * مرحلة المشروع (project_status) منفصلة عن حالة النشر أعلاه: النشر = هل يراه الطلاب،
+     * والمرحلة = أين وصل المشروع. الطلاب يقدّمون فقط على مشروع منشور في مرحلة open.
+     */
+    public const PROJECT_DRAFT = 'draft';
+
+    public const PROJECT_OPEN = 'open';
+
+    public const PROJECT_MATCHING = 'matching';
+
+    public const PROJECT_TEAM_FORMATION = 'team_formation';
+
+    public const PROJECT_IN_PROGRESS = 'in_progress';
+
+    public const PROJECT_COMPLETED = 'completed';
+
+    public const PROJECT_CANCELLED = 'cancelled';
+
+    public const PROJECT_STATUSES = [
+        self::PROJECT_DRAFT,
+        self::PROJECT_OPEN,
+        self::PROJECT_MATCHING,
+        self::PROJECT_TEAM_FORMATION,
+        self::PROJECT_IN_PROGRESS,
+        self::PROJECT_COMPLETED,
+        self::PROJECT_CANCELLED,
+    ];
+
+    /** الانتقالات التي تملكها المؤسسة يدويًا؛ team_formation يُضبط تلقائيًا عند حفظ الفريق */
+    public const MANUAL_TRANSITIONS = [
+        self::PROJECT_OPEN => [self::PROJECT_MATCHING],
+        self::PROJECT_MATCHING => [self::PROJECT_OPEN],
+    ];
+
+    /** مراحل يمكن فيها تكوين الفريق أو تعديله */
+    public const TEAM_STAGES = [self::PROJECT_OPEN, self::PROJECT_MATCHING, self::PROJECT_TEAM_FORMATION];
+
     protected $fillable = [
         'project_request_id',
         'organization_id',
         'active_version_id',
         'status',
+        'project_status',
         'title',
         'summary',
+        'min_weekly_hours',
         'moderation_note',
         'published_at',
         'status_changed_at',
+    ];
+
+    protected $attributes = [
+        'project_status' => self::PROJECT_OPEN,
     ];
 
     protected function casts(): array
@@ -34,7 +78,29 @@ class ProjectOpportunity extends Model
         return [
             'published_at' => 'datetime',
             'status_changed_at' => 'datetime',
+            'min_weekly_hours' => 'integer',
         ];
+    }
+
+    public function acceptsApplications(): bool
+    {
+        return $this->status === self::STATUS_PUBLISHED && $this->project_status === self::PROJECT_OPEN;
+    }
+
+    public function applications(): HasMany
+    {
+        return $this->hasMany(ProjectApplication::class);
+    }
+
+    public function teams(): HasMany
+    {
+        return $this->hasMany(ProjectTeam::class);
+    }
+
+    /** الفريق القائم (غير الملغى) للمشروع؛ واحد على الأكثر */
+    public function currentTeam(): ?ProjectTeam
+    {
+        return $this->teams()->where('status', '!=', ProjectTeam::STATUS_CANCELLED)->latest('id')->first();
     }
 
     public function scopePublished(Builder $query): Builder

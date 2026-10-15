@@ -115,7 +115,7 @@ class OpportunityMatcher
     }
 
     /**
-     * كل الفرص المنشورة مع أهلية الطالب لكل دور؛ الأقرب للأهلية أولًا ثم الأحدث نشرًا.
+     * كل الفرص المنشورة المفتوحة للتقديم مع أهلية الطالب لكل دور؛ الأقرب للأهلية أولًا ثم الأحدث نشرًا.
      *
      * @return array<int, array{opportunity: ProjectOpportunity, roles: array<int, array>, eligibility: array, matches: array}>
      */
@@ -124,6 +124,7 @@ class OpportunityMatcher
         $context = $this->context($student);
 
         return $this->publishedQuery()
+            ->where('project_status', ProjectOpportunity::PROJECT_OPEN)
             ->latest('published_at')
             ->latest('id')
             ->get()
@@ -133,12 +134,69 @@ class OpportunityMatcher
             ->all();
     }
 
-    /** null فقط إذا لم تكن الفرصة منشورة (غير موجودة أو معلقة أو مسحوبة)؛ عدم الأهلية لا يخفيها. */
+    /**
+     * null إذا لم تكن الفرصة منشورة (غير موجودة أو معلقة أو مسحوبة)، أو أغلقت التقديم ولم يقدّم عليها الطالب.
+     * عدم الأهلية لا يخفيها، ومن قدّم يبقى قادرًا على متابعة الفرصة بعد إغلاق التقديم.
+     */
     public function findForStudent(StudentProfile $student, int $opportunityId): ?array
     {
-        $opportunity = $this->publishedQuery()->whereKey($opportunityId)->first();
+        $opportunity = $this->publishedQuery()
+            ->whereKey($opportunityId)
+            ->where(fn ($query) => $query
+                ->where('project_status', ProjectOpportunity::PROJECT_OPEN)
+                ->orWhereHas('applications', fn ($applications) => $applications->where('student_profile_id', $student->id)))
+            ->first();
 
         return $opportunity ? $this->entry($opportunity, $this->context($student)) : null;
+    }
+
+    /**
+     * أهلية الطالب لكل دور في النسخة النشطة لمشروع، بالقواعد نفسها التي يراها الطالب.
+     * $context من contextFor (استعلامات جديدة) أو contextFromLoaded (علاقات محمّلة مسبقًا لعدة طلاب).
+     *
+     * @return array<int, array> role_id => التقييم (status, message, reasons, skills)
+     */
+    public function evaluateRoles(ProjectOpportunity $opportunity, array $context): array
+    {
+        $opportunity->loadMissing('activeVersion.roles.skills.skill:id,name');
+        $roles = [];
+        foreach ($opportunity->activeVersion->roles as $role) {
+            $roles[$role->id] = $this->evaluateRole($role, $context);
+        }
+
+        return $roles;
+    }
+
+    /** @return array<int, int> معرّفات الأدوار التي يستوفيها الطالب الآن (يُستدعى قبل كل تقديم أو اختيار للفريق) */
+    public function eligibleRoleIds(StudentProfile $student, ProjectOpportunity $opportunity): array
+    {
+        return array_keys(array_filter(
+            $this->evaluateRoles($opportunity, $this->contextFor($student)),
+            fn (array $evaluation): bool => $evaluation['status'] === self::ELIGIBLE
+        ));
+    }
+
+    public function contextFor(StudentProfile $student): array
+    {
+        return $this->context($student);
+    }
+
+    /** السياق نفسه من علاقات studentSkills و skillAssessments المحمّلة مسبقًا (دون استعلامات لكل طالب). */
+    public function contextFromLoaded(StudentProfile $student, ?array $practical = null): array
+    {
+        $practical ??= SkillVerification::practicalSkillIds();
+        $selected = $student->studentSkills->pluck('skill_id')->map(fn ($id): int => (int) $id)->all();
+        $results = $student->skillAssessments->groupBy('skill_id');
+        $highest = $results->map(fn (Collection $items): ?string => SkillVerification::highestLevel($items, $practical))->filter();
+
+        return [
+            'specialization' => $this->specialization($student),
+            'selected' => $selected,
+            'verified' => $highest->only($selected)->all(),
+            'verified_unselected' => $highest->except($selected)->all(),
+            'attempted' => $results->keys()->map(fn ($id): int => (int) $id)->all(),
+            'practical' => $practical,
+        ];
     }
 
     /**

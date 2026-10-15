@@ -38,5 +38,7 @@ class AppServiceProvider extends ServiceProvider
         RateLimiter::for('oauth', fn (Request $request) => Limit::perMinute(20)->by($request->ip()));
         // بدء وتسليم اختبارات المهارات لكل طالب
         RateLimiter::for('assessments', fn (Request $request) => Limit::perMinute(30)->by((string) $request->user()?->id ?: $request->ip()));
+        // التقديم على المشاريع وسحب الطلبات لكل طالب
+        RateLimiter::for('applications', fn (Request $request) => Limit::perMinute(20)->by((string) $request->user()?->id ?: $request->ip()));
     }
 }

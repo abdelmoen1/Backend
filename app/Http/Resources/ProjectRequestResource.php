@@ -53,6 +53,9 @@ class ProjectRequestResource extends JsonResource
         $publication = [
             'opportunity_id' => $opportunity->id,
             'status' => $opportunity->status,
+            'project_status' => $opportunity->project_status,
+            'applications_count' => $opportunity->applications()->where('status', '!=', 'withdrawn')->count(),
+            'team_status' => $opportunity->currentTeam()?->status,
             'published_at' => $opportunity->published_at,
             'version' => $version->version,
             'approved_at' => $version->approved_at,

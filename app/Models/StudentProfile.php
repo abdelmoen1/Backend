@@ -19,6 +19,7 @@ class StudentProfile extends Model
         'university',
         'academic_major',
         'professional_specialization',
+        'weekly_availability_hours',
         'graduation_year',
         'phone',
         'linkedin_url',
@@ -29,6 +30,7 @@ class StudentProfile extends Model
 
     protected $casts = [
         'onboarding_completed' => 'boolean',
+        'weekly_availability_hours' => 'integer',
     ];
 
     public function user(): BelongsTo
@@ -59,5 +61,15 @@ class StudentProfile extends Model
     public function profileDetails(): HasOne
     {
         return $this->hasOne(StudentProfileDetails::class);
+    }
+
+    public function applications(): HasMany
+    {
+        return $this->hasMany(ProjectApplication::class);
+    }
+
+    public function teamMemberships(): HasMany
+    {
+        return $this->hasMany(ProjectTeamMember::class);
     }
 }
