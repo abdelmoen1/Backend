@@ -2,11 +2,11 @@
 
 namespace Tests\Feature;
 
+use App\Models\StudentProfile;
 use App\Models\User;
-use Illuminate\Database\QueryException;
 use Illuminate\Foundation\Testing\RefreshDatabase;
-use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Hash;
+use RuntimeException;
 use Tests\TestCase;
 
 class RegistrationTest extends TestCase
@@ -25,7 +25,7 @@ class RegistrationTest extends TestCase
         ]);
 
         $response->assertCreated()
-            ->assertJsonPath('message', 'Registration successful.')
+            ->assertJsonPath('message', 'تم إنشاء الحساب بنجاح')
             ->assertJsonPath('user.email', 'amina@example.com')
             ->assertJsonPath('user.role', 'student')
             ->assertJsonStructure(['token', 'user' => ['id', 'name', 'email', 'role', 'created_at', 'updated_at']])
@@ -43,23 +43,23 @@ class RegistrationTest extends TestCase
         $this->assertDatabaseHas('personal_access_tokens', ['tokenable_id' => $user->id]);
     }
 
-    public function test_institution_registration_creates_organization_profile_and_token(): void
+    public function test_organization_registration_creates_organization_profile_and_token(): void
     {
         $response = $this->postJson('/api/register', [
-            'name' => 'Example Institution',
-            'email' => 'institution@example.com',
+            'name' => 'Example Organization',
+            'email' => 'organization@example.com',
             'password' => 'SecurePass123',
             'password_confirmation' => 'SecurePass123',
-            'role' => 'institution',
+            'role' => 'organization',
         ]);
 
         $response->assertCreated()
-            ->assertJsonPath('user.role', 'institution')
+            ->assertJsonPath('user.role', 'organization')
             ->assertJsonStructure(['token', 'user' => ['id', 'name', 'email', 'role']]);
 
-        $user = User::where('email', 'institution@example.com')->firstOrFail();
+        $user = User::where('email', 'organization@example.com')->firstOrFail();
 
-        $this->assertSame('institution', $user->role);
+        $this->assertSame('organization', $user->role);
         $this->assertDatabaseHas('organization_profiles', ['user_id' => $user->id]);
         $this->assertDatabaseMissing('student_profiles', ['user_id' => $user->id]);
         $this->assertDatabaseHas('personal_access_tokens', ['tokenable_id' => $user->id]);
@@ -110,13 +110,16 @@ class RegistrationTest extends TestCase
 
     public function test_profile_creation_failure_rolls_back_the_user(): void
     {
-        DB::statement("CREATE TRIGGER fail_student_profile_insert BEFORE INSERT ON student_profiles BEGIN SELECT RAISE(ABORT, 'profile creation failed'); END");
+        // فشل إنشاء الملف بعد إدراج المستخدم؛ يعمل على أي محرك قاعدة بيانات (لا trigger خاص بـ SQLite)
+        StudentProfile::creating(function (): never {
+            throw new RuntimeException('profile creation failed');
+        });
         $this->withoutExceptionHandling();
 
         try {
             $this->postJson('/api/register', $this->registrationData());
             $this->fail('The profile insert should fail.');
-        } catch (QueryException) {
+        } catch (RuntimeException) {
             $this->assertDatabaseCount('users', 0);
             $this->assertDatabaseCount('student_profiles', 0);
         }

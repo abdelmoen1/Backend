@@ -1,18 +1,40 @@
-FROM php:8.3-fpm
+FROM php:8.3-apache
 
-# المكتبات اللي يحتاجها composer
-RUN apt-get update && apt-get install -y git unzip libzip-dev \
-    && docker-php-ext-install zip pdo_mysql
+# مكتبات الامتدادات: zip لـ composer، و pdo_mysql و pdo_pgsql حتى يكون محرك قاعدة البيانات إعدادًا لا إعادة بناء
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends git unzip libzip-dev libpq-dev libicu-dev \
+    && docker-php-ext-install zip pdo_mysql pdo_pgsql intl bcmath opcache \
+    && a2enmod rewrite headers \
+    && rm -rf /var/lib/apt/lists/*
 
 COPY --from=composer:2 /usr/bin/composer /usr/bin/composer
 
-WORKDIR /var/www
+# Apache يخدم public/ فقط ويستمع على PORT الذي تحدده المنصة (Render يمرر 10000 افتراضيًا)
+COPY docker/apache-vhost.conf /etc/apache2/sites-available/000-default.conf
+RUN sed -ri 's/^Listen 80$/Listen ${PORT}/' /etc/apache2/ports.conf \
+    && echo 'ServerName localhost' >> /etc/apache2/apache2.conf
+COPY docker/php-production.ini /usr/local/etc/php/conf.d/zz-production.ini
+
+WORKDIR /var/www/html
+
+# تثبيت الاعتماديات قبل نسخ الكود حتى تُعاد طبقة composer فقط عند تغير composer.lock
+COPY composer.json composer.lock ./
+RUN composer install --no-dev --no-scripts --no-autoloader --no-interaction --prefer-dist
+
 COPY . .
+RUN composer dump-autoload --optimize --no-dev \
+    && php artisan package:discover --ansi \
+    && mkdir -p storage/framework/cache/data storage/framework/sessions storage/framework/views \
+        storage/logs storage/app/public bootstrap/cache \
+    && chown -R www-data:www-data storage bootstrap/cache \
+    && chmod +x docker/entrypoint.sh
 
-RUN composer install --no-dev --optimize-autoloader
+ENV PORT=10000 \
+    APP_ENV=production \
+    APP_DEBUG=false \
+    LOG_CHANNEL=stderr \
+    LOG_STACK=stderr
 
-# سجلات Laravel تُكتب أيضًا إلى stderr لتظهر في سجلات منصة الاستضافة؛ ملف السجل داخل الحاوية
-# لا يمكن قراءته بدون صلاحية shell. أي قيمة LOG_STACK في إعدادات المنصة تتقدم على هذه القيمة.
-ENV LOG_STACK=single,stderr
+EXPOSE 10000
 
-CMD php artisan serve --host=0.0.0.0 --port=${PORT:-8080}
+ENTRYPOINT ["docker/entrypoint.sh"]
