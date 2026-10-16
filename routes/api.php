@@ -1,10 +1,15 @@
 <?php
 
+use App\Http\Controllers\Api\AdminController;
 use App\Http\Controllers\Api\AuthController;
 use App\Http\Controllers\Api\HealthController;
+use App\Http\Controllers\Api\LeaderProjectController;
+use App\Http\Controllers\Api\NotificationController;
 use App\Http\Controllers\Api\OrganizationProfileController;
+use App\Http\Controllers\Api\OrganizationProjectController;
 use App\Http\Controllers\Api\ProfileImageController;
 use App\Http\Controllers\Api\ProjectDiscoveryController;
+use App\Http\Controllers\Api\ProjectPlanController;
 use App\Http\Controllers\Api\ProjectRequestController;
 use App\Http\Controllers\Api\ProjectTeamController;
 use App\Http\Controllers\Api\SkillController;
@@ -19,7 +24,7 @@ use Illuminate\Support\Facades\Route;
 
 Route::get('/health', HealthController::class);
 
-Route::post('/register',[AuthController::class, 'register'])->middleware('throttle:register');
+Route::post('/register', [AuthController::class, 'register'])->middleware('throttle:register');
 Route::post('/login', [AuthController::class, 'login'])->middleware('throttle:login');
 Route::post('/auth/google/exchange', [GoogleAuthController::class, 'exchange'])->middleware('throttle:oauth');
 
@@ -31,7 +36,7 @@ Route::get(
     ->where('filename', '[A-Za-z0-9][A-Za-z0-9._-]*')
     ->name('api.profile-images.student');
 
-Route::middleware('auth:sanctum')->group(function () {
+Route::middleware(['auth:sanctum', 'active'])->group(function () {
     Route::post('/logout', [AuthController::class, 'logout']);
     Route::get('/me', [AuthController::class, 'me']);
 
@@ -75,14 +80,41 @@ Route::middleware('auth:sanctum')->group(function () {
     });
     Route::get('/student/applications', [StudentApplicationController::class, 'index']);
 
-    // المطابقة وتكوين الفريق: للمؤسسة صاحبة المشروع فقط (تحقق الملكية في المتحكم)
+    // المطابقة وتكوين الفريق: لقائد الفريق الساري الذي عيّنه مدير المنصة فقط (التحقق في المتحكم)
     Route::get('/projects/{project}/matches', [ProjectTeamController::class, 'matches'])->whereNumber('project');
     Route::patch('/projects/{project}', [ProjectTeamController::class, 'update'])->whereNumber('project');
     Route::patch('/projects/{project}/applications/{application}', [ProjectTeamController::class, 'reviewApplication'])->whereNumber(['project', 'application']);
     Route::get('/projects/{project}/team', [ProjectTeamController::class, 'showTeam'])->whereNumber('project');
     Route::post('/projects/{project}/team', [ProjectTeamController::class, 'storeTeam'])->whereNumber('project');
-    Route::post('/teams/{team}/leader', [ProjectTeamController::class, 'assignLeader'])->whereNumber('team');
     Route::post('/teams/{team}/confirm', [ProjectTeamController::class, 'confirmTeam'])->whereNumber('team');
+
+    // مساحة التخطيط والاتفاق: القائد يكتب ويقدّم، المؤسسة توافق أو تطلب تعديلًا، والطرفان يعلّقان
+    Route::get('/projects/{project}/plan', [ProjectPlanController::class, 'show'])->whereNumber('project');
+    Route::put('/projects/{project}/plan/draft', [ProjectPlanController::class, 'saveDraft'])->whereNumber('project');
+    Route::post('/projects/{project}/plan/versions/{version}/submit', [ProjectPlanController::class, 'submit'])->whereNumber(['project', 'version']);
+    Route::post('/projects/{project}/plan/versions/{version}/decision', [ProjectPlanController::class, 'decide'])->whereNumber(['project', 'version']);
+    Route::post('/projects/{project}/plan/versions/{version}/comments', [ProjectPlanController::class, 'comment'])->whereNumber(['project', 'version'])->middleware('throttle:60,1');
+    Route::post('/projects/{project}/start', [LeaderProjectController::class, 'start'])->whereNumber('project');
+    Route::get('/leader/projects', [LeaderProjectController::class, 'index']);
+
+    Route::get('/organization/projects/{project}', [OrganizationProjectController::class, 'show'])->whereNumber('project');
+
+    Route::get('/notifications', [NotificationController::class, 'index']);
+    Route::post('/notifications/read-all', [NotificationController::class, 'markAllRead']);
+    Route::post('/notifications/{notification}/read', [NotificationController::class, 'markRead']);
+
+    // إدارة المنصة: الدور admin فقط (middleware في الخادم)
+    Route::prefix('admin')->middleware('admin')->group(function () {
+        Route::get('/overview', [AdminController::class, 'overview']);
+        Route::get('/projects', [AdminController::class, 'projects']);
+        Route::get('/projects/{project}', [AdminController::class, 'project'])->whereNumber('project');
+        Route::post('/projects/{project}/review', [AdminController::class, 'review'])->whereNumber('project');
+        Route::get('/projects/{project}/leader-candidates', [AdminController::class, 'leaderCandidates'])->whereNumber('project');
+        Route::post('/projects/{project}/leader', [AdminController::class, 'assignLeader'])->whereNumber('project');
+        Route::delete('/projects/{project}/leader', [AdminController::class, 'revokeLeader'])->whereNumber('project');
+        Route::get('/users', [AdminController::class, 'users']);
+        Route::patch('/users/{user}', [AdminController::class, 'updateUser'])->whereNumber('user');
+    });
 
     Route::get('/organization/onboarding', [OrganizationProfileController::class, 'show']);
     Route::patch('/organization/onboarding', [OrganizationProfileController::class, 'update']);

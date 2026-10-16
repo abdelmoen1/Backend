@@ -39,6 +39,11 @@ class ProjectApplications
                     throw new ProjectActionException('هذه الفرصة غير متاحة حاليًا.', 'not_found', 404);
                 }
 
+                // القيادة مرتبطة بالمشروع: من يقود هذا المشروع لا يتقدم إليه (ويمكنه التقديم على مشاريع أخرى)
+                if ($opportunity->leaderAssignments()->active()->where('leader_user_id', $student->user_id)->exists()) {
+                    throw new ProjectActionException('أنت قائد فريق هذا المشروع، فلا يمكنك التقديم عليه كعضو.', 'leader_of_project', 409);
+                }
+
                 $existing = $opportunity->applications()->where('student_profile_id', $student->id)->first();
                 if ($existing) {
                     throw new ProjectActionException('سبق أن قدّمت على هذه الفرصة. يمكنك متابعة حالة طلبك من صفحة طلباتي.', 'already_applied', 409, ['application' => $existing]);

@@ -21,4 +21,9 @@ if [ "${RUN_SEEDERS:-false}" = "true" ]; then
     php artisan db:seed --force --no-interaction
 fi
 
+if [ -n "${ADMIN_PROMOTE_EMAILS:-}" ]; then
+    # يرقّي حسابات قائمة فقط؛ لا يُنشئ حسابات. فشله لا يوقف الخدمة.
+    php artisan gotrainee:promote-admin "${ADMIN_PROMOTE_EMAILS}" || echo "[entrypoint] admin promotion skipped"
+fi
+
 exec apache2-foreground

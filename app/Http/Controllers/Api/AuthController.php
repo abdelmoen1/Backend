@@ -3,6 +3,7 @@
 namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
+use App\Http\Requests\LoginRequest;
 use App\Http\Requests\RegisterRequest;
 use App\Http\Resources\UserResource;
 use App\Models\User;
@@ -11,7 +12,6 @@ use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Validation\ValidationException;
-use App\Http\Requests\LoginRequest;
 
 class AuthController extends Controller
 {
@@ -37,6 +37,7 @@ class AuthController extends Controller
             'token' => $token,
         ], 201);
     }
+
     public function login(LoginRequest $request): JsonResponse
     {
         $validated = $request->validated();
@@ -47,6 +48,13 @@ class AuthController extends Controller
             throw ValidationException::withMessages([
                 'email' => ['البريد الإلكتروني أو كلمة المرور غير صحيحة.'],
             ]);
+        }
+
+        if (! $user->isActive()) {
+            return response()->json([
+                'message' => 'تم إيقاف هذا الحساب. تواصل مع إدارة المنصة.',
+                'code' => 'account_deactivated',
+            ], 403);
         }
 
         $token = $user->createToken('auth_token')->plainTextToken;

@@ -165,14 +165,14 @@ class ProjectProposalFlowTest extends TestCase
             ->assertOk()
             ->assertJsonPath('data.status', ProjectRequestStatus::PROPOSAL_READY);
 
-        // الاعتماد يتطلب تأكيدًا صريحًا للأدوار والمهارات ثم ينشر المشروع
+        // الاعتماد يتطلب تأكيدًا صريحًا للأدوار والمهارات ثم يرسل المشروع لمراجعة مدير المنصة
         $this->postJson("/api/organization/project-requests/{$projectRequestId}/approve")
             ->assertUnprocessable()
             ->assertJsonValidationErrors('confirm_requirements');
         $this->postJson("/api/organization/project-requests/{$projectRequestId}/approve", ProjectProposalFixture::approval())
             ->assertOk()
             ->assertJsonPath('data.status', ProjectRequestStatus::CONVERTED_TO_OPPORTUNITY)
-            ->assertJsonPath('data.publication.status', 'published')
+            ->assertJsonPath('data.publication.status', 'pending_review')
             ->assertJsonPath('data.publication.version', 1);
     }
 
@@ -247,7 +247,7 @@ class ProjectProposalFlowTest extends TestCase
             'note' => 'Please make one more change.',
         ])->assertOk()
             ->assertJsonPath('data.status', ProjectRequestStatus::REVISION_REQUESTED)
-            ->assertJsonPath('data.publication.status', 'published')
+            ->assertJsonPath('data.publication.status', 'pending_review')
             ->assertJsonPath('data.publication.version', 1);
     }
 

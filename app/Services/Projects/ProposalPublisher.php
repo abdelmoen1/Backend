@@ -3,6 +3,7 @@
 namespace App\Services\Projects;
 
 use App\Enums\ProjectRequestStatus;
+use App\Models\AuditLog;
 use App\Models\ProjectOpportunity;
 use App\Models\ProjectProposalVersion;
 use App\Models\ProjectRequest;
@@ -54,6 +55,15 @@ class ProposalPublisher
                 ->first();
 
             if ($version && $opportunity && $opportunity->active_version_id === $version->id) {
+                // إعادة الاعتماد بعد طلب تعديل من مدير المنصة تعيد المشروع لقائمة المراجعة (حتى دون تغيير المحتوى)
+                if ($opportunity->status === ProjectOpportunity::STATUS_CHANGES_REQUESTED) {
+                    $opportunity->forceFill([
+                        'status' => ProjectOpportunity::STATUS_PENDING_REVIEW,
+                        'status_changed_at' => now(),
+                        'submitted_for_review_at' => now(),
+                    ])->save();
+                    AuditLog::record($approver, 'proposal.submitted_for_review', $opportunity, ['version' => $version->version]);
+                }
                 $this->markPublished($record);
 
                 return $opportunity;
@@ -67,19 +77,21 @@ class ProposalPublisher
             $opportunity->active_version_id = $version->id;
             $opportunity->title = $proposal['project_overview']['project_name'] ?? $record->title;
             $opportunity->summary = $proposal['project_overview']['executive_summary'] ?? null;
-            // تعليق الإدارة لا يُلغى باعتماد المؤسسة لنسخة جديدة
+            // اعتماد المؤسسة لا ينشر للطلاب مباشرة: كل نسخة جديدة تنتظر مراجعة مدير المنصة (قبول/رفض/طلب تعديل).
+            // تعليق الإدارة أو سحبها لا يُلغى باعتماد المؤسسة لنسخة جديدة.
             if (! in_array($opportunity->status, [ProjectOpportunity::STATUS_SUSPENDED, ProjectOpportunity::STATUS_WITHDRAWN], true)) {
-                if ($opportunity->status !== ProjectOpportunity::STATUS_PUBLISHED) {
+                if ($opportunity->status !== ProjectOpportunity::STATUS_PENDING_REVIEW) {
                     $opportunity->status_changed_at = now();
                 }
-                $opportunity->status = ProjectOpportunity::STATUS_PUBLISHED;
-                $opportunity->published_at ??= now();
+                $opportunity->status = ProjectOpportunity::STATUS_PENDING_REVIEW;
+                $opportunity->submitted_for_review_at = now();
             }
             $opportunity->save();
+            AuditLog::record($approver, 'proposal.submitted_for_review', $opportunity, ['version' => $version->version]);
 
             $this->markPublished($record);
 
-            Log::info('Project proposal approved and published.', [
+            Log::info('Project proposal approved and submitted for platform review.', [
                 'project_request_id' => $record->id,
                 'opportunity_id' => $opportunity->id,
                 'version' => $version->version,

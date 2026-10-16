@@ -5,6 +5,7 @@ namespace App\Models;
 // use Illuminate\Contracts\Auth\MustVerifyEmail;
 use Database\Factories\UserFactory;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
+use Illuminate\Database\Eloquent\Relations\HasMany;
 use Illuminate\Database\Eloquent\Relations\HasOne;
 use Illuminate\Foundation\Auth\User as Authenticatable;
 use Illuminate\Notifications\Notifiable;
@@ -14,6 +15,13 @@ class User extends Authenticatable
 {
     /** @use HasFactory<UserFactory> */
     use HasApiTokens, HasFactory, Notifiable;
+
+    public const ROLE_STUDENT = 'student';
+
+    public const ROLE_ORGANIZATION = 'organization';
+
+    /** مدير المنصة: لا يُنشأ بالتسجيل العام؛ يُرقّى حساب قائم عبر أمر gotrainee:promote-admin فقط */
+    public const ROLE_ADMIN = 'admin';
 
     /**
      * The attributes that are mass assignable.
@@ -47,6 +55,8 @@ class User extends Authenticatable
     {
         return [
             'email_verified_at' => 'datetime',
+            'is_active' => 'boolean',
+            'deactivated_at' => 'datetime',
             'password' => 'hashed',
         ];
     }
@@ -73,5 +83,21 @@ class User extends Authenticatable
     public function organizationProfile(): HasOne
     {
         return $this->hasOne(OrganizationProfile::class);
+    }
+
+    public function isAdmin(): bool
+    {
+        return $this->role === self::ROLE_ADMIN;
+    }
+
+    /** الحساب الموقوف لا يصل لأي مسار محمي (يُرفض الدخول وتُرفض رموزه القائمة) */
+    public function isActive(): bool
+    {
+        return $this->is_active !== false;
+    }
+
+    public function leaderAssignments(): HasMany
+    {
+        return $this->hasMany(ProjectLeaderAssignment::class, 'leader_user_id');
     }
 }

@@ -120,6 +120,13 @@ class GoogleAuthController extends Controller
             ], 422);
         }
 
+        if (! $user->isActive()) {
+            return response()->json([
+                'message' => 'تم إيقاف هذا الحساب. تواصل مع إدارة المنصة.',
+                'code' => 'account_deactivated',
+            ], 403);
+        }
+
         return response()->json([
             'message' => 'تم تسجيل الدخول بنجاح.',
             'user' => new UserResource($user->load('studentProfile', 'organizationProfile')),
