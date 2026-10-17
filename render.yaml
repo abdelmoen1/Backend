@@ -36,7 +36,9 @@ services:
       - key: QUEUE_CONNECTION
         value: sync
       - key: DB_CONNECTION
-        value: pgsql            # staging; production target is MySQL (see runbook)
+        value: pgsql            # Neon Free PostgreSQL (docs/operations/NEON_DATABASE_SETUP.md)
+      - key: DB_SSLMODE
+        value: require
       - key: RUN_MIGRATIONS
         value: "true"
       - key: RUN_SEEDERS
@@ -83,9 +85,5 @@ services:
         name: X-Content-Type-Options
         value: nosniff
 
-databases:
-  - name: gotrainee-staging-db   # free tier, expires 2026-11-15 - staging only
-    plan: free
-    region: frankfurt
-    databaseName: gotrainee
-    user: gotrainee
+# The database is external: Neon project "gotrainee" (aws-eu-central-1), set through the secret DB_URL.
+# The former Render Postgres "gotrainee-staging-db" (free, expires 2026-11-15) is no longer used and is not declared here.

@@ -12,8 +12,8 @@ No credentials appear in this document. Staging test accounts are disposable, an
 | Latest tested frontend commit | `777cc26` |
 | Live on Render (staging) | Backend `43575db` (health `200`, `driver=pgsql`, migrated); frontend `777cc26` |
 | URLs | API https://backend-sq66.onrender.com/api · Web https://gotrainee-web.onrender.com |
-| Database | Render free Postgres 16 `gotrainee-staging-db`, **staging only**, expires 2026-11-15, no backups |
-| Railway (old production) | MySQL service has no running deployment (its last Backend deploy failed). Data is unreachable. Unchanged by this session |
+| Database | **Neon Free** PostgreSQL 18, project `gotrainee` (aws-eu-central-1), connected 2026-10-17 and migrated (39/39); see `NEON_DATABASE_SETUP.md`. The former Render Postgres is unused and was not deleted |
+| Railway (old production) | Not used. Its test data is disposable by owner decision (2026-10-17) |
 
 ## Completed in the 2026-10-17 session
 
@@ -47,8 +47,8 @@ No credentials appear in this document. Staging test accounts are disposable, an
 
 ## Blockers (need the owner)
 
-1. **Production data (Railway MySQL).** The service is not running and the workspace is inactive (credit). Restarting it is a billable Railway deploy that needs owner approval. Procedure: runbook §7.
-2. **Production database (cost decision).** Staging uses free Postgres, which expires on 2026-11-15 and has no backups. Choose option A, B or C in runbook §6. All engines are tested.
+1. ~~Production data (Railway MySQL).~~ Resolved 2026-10-17: the owner declared the old data disposable.
+2. ~~Production database (cost decision).~~ Resolved 2026-10-17: Neon Free PostgreSQL is connected. The new database has no accounts yet; register a real admin and set `ADMIN_PROMOTE_EMAILS` (see `NEON_DATABASE_SETUP.md` §8).
 3. **Google sign-in on Render.** Add `https://backend-sq66.onrender.com/auth/google/callback` to the OAuth client in Google Cloud Console.
 4. **Uploaded profile images** are lost on redeploy (free tier, no disk). This needs a paid disk or S3-compatible storage.
 5. **GitHub CLI is not authenticated**, so PRs cannot be opened from this machine. Branches are pushed with git.

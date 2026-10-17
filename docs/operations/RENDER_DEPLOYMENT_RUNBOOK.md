@@ -8,11 +8,12 @@ No credentials appear in this document. Secrets live only in Render's environmen
 |---|---|---|---|
 | Backend API (Laravel 12, PHP 8.3, Apache) | Web service `Backend`, Docker, **free** plan, Frankfurt | https://backend-sq66.onrender.com — `srv-db0h3vfavr4c73fmdo20` | `abdelmoen1/Backend` (`Dockerfile`) |
 | Frontend (React 19 + Vite) | Static site `gotrainee-web`, free | https://gotrainee-web.onrender.com — `srv-db94q4nbtjjs7395r060` | `abdelmoen1/Frontend` |
-| Database (staging) | Render Postgres 16 `gotrainee-staging-db`, **free** | `dpg-db94fk3rjlhs73c8jdtg-a` (internal URL only) | — |
+| Database (since 2026-10-17) | **Neon Free** PostgreSQL 18, project `gotrainee` (`shy-cherry-96993664`), `aws-eu-central-1` | direct endpoint `ep-fancy-cake-b9jzxuoh`, connection in secret `DB_URL` | see `NEON_DATABASE_SETUP.md` |
+| Former database (unused) | Render Postgres 16 `gotrainee-staging-db`, free, expires 2026-11-15 | `dpg-db94fk3rjlhs73c8jdtg-a` | kept only as a fallback; not deleted |
 
 All three are in Render project **Go Trainee**, environment `evm-db0gvrad0e5s73bjm96g`. `render.yaml` in the backend repo documents the same configuration (Blueprint format).
 
-**The database is a staging database.** Render free Postgres expires on **2026-11-15** (30 days after creation) and has no backups. It must not hold real production data. See §6 for the production database decision.
+**Database:** since 2026-10-17 the Backend uses a Neon Free PostgreSQL database (owner decision: zero cost; the old Railway and Render test data is disposable). Neon Free scales its compute to zero when idle and has usage limits; see `NEON_DATABASE_SETUP.md`. The cost options in §6 remain relevant if the project outgrows the free tier.
 
 ## 2. How the backend container starts
 
@@ -59,7 +60,7 @@ Frontend (build-time): `VITE_API_BASE_URL=https://backend-sq66.onrender.com/api`
 
 The public registration endpoint rejects `role=admin`.
 
-## 6. Production database: decision required (cost)
+## 6. Production database options (historical; Neon Free chosen on 2026-10-17)
 
 The SRS specifies **MySQL**, and the old production data is MySQL 8 on Railway. Options:
 
