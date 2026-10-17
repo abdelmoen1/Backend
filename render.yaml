@@ -1,0 +1,91 @@
+# Render Blueprint for GoTrainee (documentation of the live setup; see docs/operations/RENDER_DEPLOYMENT_RUNBOOK.md).
+# Secrets (APP_KEY, DB_URL, GEMINI_API_KEY, GOOGLE_CLIENT_*) are marked sync: false and are set in the dashboard/API,
+# never committed. The frontend lives in the separate abdelmoen1/Frontend repository.
+services:
+  - type: web
+    name: Backend
+    runtime: docker
+    repo: https://github.com/abdelmoen1/Backend
+    branch: main
+    region: frankfurt
+    plan: free
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /api/health
+    autoDeploy: true
+    envVars:
+      - key: APP_ENV
+        value: production
+      - key: APP_DEBUG
+        value: "false"
+      - key: APP_NAME
+        value: GoTrainee
+      - key: APP_URL
+        value: https://backend-sq66.onrender.com
+      - key: APP_LOCALE
+        value: ar
+      - key: FRONTEND_URL
+        value: https://gotrainee-web.onrender.com
+      - key: LOG_CHANNEL
+        value: stderr
+      - key: LOG_LEVEL
+        value: info
+      - key: SESSION_DRIVER
+        value: database
+      - key: CACHE_STORE
+        value: database
+      - key: QUEUE_CONNECTION
+        value: sync
+      - key: DB_CONNECTION
+        value: pgsql            # staging; production target is MySQL (see runbook)
+      - key: RUN_MIGRATIONS
+        value: "true"
+      - key: RUN_SEEDERS
+        value: "true"
+      - key: GEMINI_MODEL
+        value: gemini-flash-lite-latest
+      - key: GOOGLE_REDIRECT_URI
+        value: https://backend-sq66.onrender.com/auth/google/callback
+      - key: APP_KEY
+        sync: false
+      - key: DB_URL
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: GOOGLE_CLIENT_ID
+        sync: false
+      - key: GOOGLE_CLIENT_SECRET
+        sync: false
+      - key: ADMIN_PROMOTE_EMAILS
+        sync: false
+
+  - type: web
+    name: gotrainee-web
+    runtime: static
+    repo: https://github.com/abdelmoen1/Frontend
+    branch: main
+    buildCommand: npm ci && npm run build
+    staticPublishPath: dist
+    autoDeploy: true
+    envVars:
+      - key: VITE_API_BASE_URL
+        value: https://backend-sq66.onrender.com/api
+      - key: NODE_VERSION
+        value: "22"
+    routes:
+      - type: rewrite
+        source: /*
+        destination: /index.html
+    headers:
+      - path: /*
+        name: X-Frame-Options
+        value: DENY
+      - path: /*
+        name: X-Content-Type-Options
+        value: nosniff
+
+databases:
+  - name: gotrainee-staging-db   # free tier, expires 2026-11-15 - staging only
+    plan: free
+    region: frankfurt
+    databaseName: gotrainee
+    user: gotrainee
