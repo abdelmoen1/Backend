@@ -85,6 +85,7 @@ class ProjectOpportunity extends Model
         'reviewed_at',
         'submitted_for_review_at',
         'execution_started_at',
+        'completed_at',
         'status',
         'project_status',
         'title',
@@ -111,6 +112,7 @@ class ProjectOpportunity extends Model
             'reviewed_at' => 'datetime',
             'submitted_for_review_at' => 'datetime',
             'execution_started_at' => 'datetime',
+            'completed_at' => 'datetime',
         ];
     }
 
@@ -179,5 +181,20 @@ class ProjectOpportunity extends Model
     public function agreedPlan(): BelongsTo
     {
         return $this->belongsTo(ProjectPlanVersion::class, 'agreed_plan_version_id');
+    }
+
+    public function milestones(): HasMany
+    {
+        return $this->hasMany(ProjectMilestone::class)->orderBy('position');
+    }
+
+    public function tasks(): HasMany
+    {
+        return $this->hasMany(ProjectTask::class);
+    }
+
+    public function clientFeedback(): HasOne
+    {
+        return $this->hasOne(ProjectClientFeedback::class);
     }
 }

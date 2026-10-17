@@ -324,6 +324,8 @@ class ProjectPlanning
                 'status_changed_at' => now(),
                 'execution_started_at' => now(),
             ])->save();
+            // مراحل الخطة المتفق عليها تصبح مراحل تتبع التقدم
+            app(ProjectExecution::class)->ensureMilestones($project);
 
             AuditLog::record($leader, 'project.execution_started', $project, ['plan_version' => $plan->version, 'team_id' => $team->id]);
 

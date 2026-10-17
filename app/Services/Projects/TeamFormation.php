@@ -2,6 +2,7 @@
 
 namespace App\Services\Projects;
 
+use App\Models\PlatformNotification;
 use App\Models\ProjectApplication;
 use App\Models\ProjectOpportunity;
 use App\Models\ProjectTeam;
@@ -169,6 +170,18 @@ class TeamFormation
                 'leader_student_profile_id' => $record->leader_student_profile_id,
                 'by_user_id' => $actor->id,
             ]);
+
+            DB::afterCommit(function () use ($members, $project): void {
+                foreach ($members as $member) {
+                    PlatformNotification::send($member->studentProfile?->user,
+                        'team.confirmed',
+                        'تم قبولك في فريق مشروع',
+                        "أكّد قائد الفريق انضمامك إلى «{$project->title}» بدور {$member->role?->title}. ستظهر مهامك عند بدء التنفيذ.",
+                        "/student/projects/{$project->id}",
+                        ['project_id' => $project->id],
+                    );
+                }
+            });
 
             return $record;
         });

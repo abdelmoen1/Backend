@@ -9,6 +9,7 @@ use App\Http\Controllers\Api\OrganizationProfileController;
 use App\Http\Controllers\Api\OrganizationProjectController;
 use App\Http\Controllers\Api\ProfileImageController;
 use App\Http\Controllers\Api\ProjectDiscoveryController;
+use App\Http\Controllers\Api\ProjectExecutionController;
 use App\Http\Controllers\Api\ProjectPlanController;
 use App\Http\Controllers\Api\ProjectRequestController;
 use App\Http\Controllers\Api\ProjectTeamController;
@@ -17,6 +18,7 @@ use App\Http\Controllers\Api\StudentApplicationController;
 use App\Http\Controllers\Api\StudentAssessmentController;
 use App\Http\Controllers\Api\StudentOpportunityController;
 use App\Http\Controllers\Api\StudentProfileController;
+use App\Http\Controllers\Api\StudentProjectController;
 use App\Http\Controllers\Api\StudentSkillController;
 use App\Http\Controllers\Auth\GoogleAuthController;
 use App\Http\Middleware\AssignRequestId;
@@ -96,6 +98,19 @@ Route::middleware(['auth:sanctum', 'active'])->group(function () {
     Route::post('/projects/{project}/plan/versions/{version}/comments', [ProjectPlanController::class, 'comment'])->whereNumber(['project', 'version'])->middleware('throttle:60,1');
     Route::post('/projects/{project}/start', [LeaderProjectController::class, 'start'])->whereNumber('project');
     Route::get('/leader/projects', [LeaderProjectController::class, 'index']);
+
+    // مساحة التنفيذ: لوحة المشروع، المهام والمراحل والتسليمات، الإكمال والتقييمات (الصلاحية لكل إجراء في المتحكم)
+    Route::get('/projects/{project}/execution', [ProjectExecutionController::class, 'show'])->whereNumber('project');
+    Route::post('/projects/{project}/tasks', [ProjectExecutionController::class, 'storeTask'])->whereNumber('project');
+    Route::patch('/projects/{project}/tasks/{task}', [ProjectExecutionController::class, 'updateTask'])->whereNumber(['project', 'task']);
+    Route::patch('/projects/{project}/milestones/{milestone}', [ProjectExecutionController::class, 'updateMilestone'])->whereNumber(['project', 'milestone']);
+    Route::post('/projects/{project}/tasks/{task}/deliverables', [ProjectExecutionController::class, 'submitDeliverable'])->whereNumber(['project', 'task'])->middleware('throttle:30,1');
+    Route::post('/projects/{project}/deliverables/{deliverable}/review', [ProjectExecutionController::class, 'reviewDeliverable'])->whereNumber(['project', 'deliverable']);
+    Route::post('/projects/{project}/complete', [ProjectExecutionController::class, 'complete'])->whereNumber('project');
+    Route::post('/projects/{project}/evaluations', [ProjectExecutionController::class, 'evaluate'])->whereNumber('project');
+    Route::post('/projects/{project}/feedback', [ProjectExecutionController::class, 'feedback'])->whereNumber('project');
+    Route::get('/student/projects', [StudentProjectController::class, 'index']);
+    Route::get('/student/evidence', [StudentProjectController::class, 'evidence']);
 
     Route::get('/organization/projects/{project}', [OrganizationProjectController::class, 'show'])->whereNumber('project');
 

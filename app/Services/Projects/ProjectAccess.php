@@ -3,6 +3,8 @@
 namespace App\Services\Projects;
 
 use App\Models\ProjectOpportunity;
+use App\Models\ProjectTeam;
+use App\Models\ProjectTeamMember;
 use App\Models\User;
 
 /**
@@ -18,6 +20,9 @@ class ProjectAccess
     public const ORGANIZATION = 'organization';
 
     public const ADMIN = 'admin';
+
+    /** عضو في فريق المشروع (مساحة التنفيذ فقط: مهامه وتسليماته) */
+    public const MEMBER = 'member';
 
     public function asLeader(User $user, int $projectId): ProjectOpportunity
     {
@@ -41,6 +46,43 @@ class ProjectAccess
         abort_unless($project, 404, 'المشروع غير موجود.');
 
         return $project;
+    }
+
+    /**
+     * عضو في فريق المشروع القائم أو المكتمل (لا الملغى). يُرجع المشروع وعضويته.
+     *
+     * @return array{0: ProjectOpportunity, 1: ProjectTeamMember}
+     */
+    public function asMember(User $user, int $projectId): array
+    {
+        $membership = $user->role === User::ROLE_STUDENT && $user->studentProfile
+            ? ProjectTeamMember::query()
+                ->where('student_profile_id', $user->studentProfile->id)
+                ->whereHas('team', fn ($query) => $query->where('project_opportunity_id', $projectId)->where('status', '!=', ProjectTeam::STATUS_CANCELLED))
+                ->with('team.opportunity')
+                ->latest('id')
+                ->first()
+            : null;
+        abort_unless($membership, 404, 'المشروع غير موجود أو لست عضوًا في فريقه.');
+
+        return [$membership->team->opportunity, $membership];
+    }
+
+    /**
+     * أطراف مساحة التنفيذ: القائد والأعضاء والمؤسسة ومدير المنصة. member يحمل العضوية، والبقية null.
+     *
+     * @return array{0: ProjectOpportunity, 1: string, 2: ?ProjectTeamMember}
+     */
+    public function executionParticipant(User $user, int $projectId): array
+    {
+        if ($user->role === User::ROLE_STUDENT && ! ProjectOpportunity::query()->whereKey($projectId)
+            ->whereHas('leaderAssignments', fn ($query) => $query->active()->where('leader_user_id', $user->id))->exists()) {
+            [$project, $membership] = $this->asMember($user, $projectId);
+
+            return [$project, self::MEMBER, $membership];
+        }
+
+        return [...$this->participant($user, $projectId), null];
     }
 
     /** @return array{0: ProjectOpportunity, 1: string} */
