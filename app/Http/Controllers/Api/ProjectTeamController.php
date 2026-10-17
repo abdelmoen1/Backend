@@ -8,6 +8,7 @@ use App\Models\ProjectOpportunity;
 use App\Models\ProjectTeam;
 use App\Models\ProjectTeamMember;
 use App\Services\Projects\CandidateRanking;
+use App\Services\Projects\ProjectAccess;
 use App\Services\Projects\ProjectActionException;
 use App\Services\Projects\ProjectApplications;
 use App\Services\Projects\ProjectStaffing;
@@ -19,9 +20,10 @@ use Illuminate\Support\Facades\Log;
 use Illuminate\Validation\Rule;
 
 /**
- * إدارة المشروع للمؤسسة المالكة: المرشحون المرتبون، حالة المشروع، مراجعة الطلبات، تكوين الفريق وقائده.
- * كل معرّف (مشروع أو فريق) يُبحث عنه ضمن مشاريع المؤسسة الحالية فقط؛ معرّف مؤسسة أخرى = 404 دون كشف وجوده.
- * لا يوجد دور مدير منصة بعد، فالمؤسسة صاحبة المشروع هي مدير المشروع المخوّل.
+ * إدارة المتقدمين والفريق لقائد الفريق الساري للمشروع (يعيّنه مدير المنصة): المرشحون المرتبون، فتح/إغلاق
+ * التقديم، مراجعة الطلبات، تكوين الفريق وتأكيده. المؤسسة لا تصل إلى هذه المسارات ولا إلى ترتيب المرشحين أو
+ * نتائج تقييماتهم؛ لها عرض للقراءة فقط في OrganizationProjectController.
+ * كل معرّف (مشروع أو فريق) يُبحث عنه ضمن المشاريع التي يقودها المستخدم فقط؛ غير ذلك = 404 دون كشف وجوده.
  */
 class ProjectTeamController extends Controller
 {
@@ -122,20 +124,6 @@ class ProjectTeamController extends Controller
         return response()->json(['success' => true, 'message' => 'تم حفظ الفريق.', 'data' => $this->team($team)]);
     }
 
-    public function assignLeader(Request $request, int $team, TeamFormation $formation): JsonResponse
-    {
-        $record = $this->ownedTeam($request, $team);
-        $validated = $request->validate(['student_profile_id' => ['required', 'integer']]);
-
-        try {
-            $record = $formation->assignLeader($record, $request->user(), (int) $validated['student_profile_id']);
-        } catch (ProjectActionException $exception) {
-            return $this->failure($exception);
-        }
-
-        return response()->json(['success' => true, 'message' => 'تم تعيين قائد الفريق.', 'data' => $this->team($record)]);
-    }
-
     public function confirmTeam(Request $request, int $team, TeamFormation $formation): JsonResponse
     {
         $record = $this->ownedTeam($request, $team);
@@ -207,32 +195,17 @@ class ProjectTeamController extends Controller
 
     private function ownedProject(Request $request, int $project): ProjectOpportunity
     {
-        $organization = $this->organization($request);
-
-        $record = ProjectOpportunity::query()->where('organization_id', $organization->id)->whereKey($project)->first();
-        abort_unless($record, 404, 'المشروع غير موجود.');
-
-        return $record;
+        return app(ProjectAccess::class)->asLeader($request->user(), $project);
     }
 
     private function ownedTeam(Request $request, int $team): ProjectTeam
     {
-        $organization = $this->organization($request);
-        $record = ProjectTeam::query()
-            ->whereHas('opportunity', fn ($query) => $query->where('organization_id', $organization->id))
-            ->whereKey($team)
-            ->first();
+        $record = ProjectTeam::query()->find($team);
         abort_unless($record, 404, 'الفريق غير موجود.');
+        // التحقق من القيادة عبر المشروع يعيد 404 نفسها لفريق مشروع لا يقوده المستخدم
+        $this->ownedProject($request, $record->project_opportunity_id);
 
         return $record;
-    }
-
-    private function organization(Request $request)
-    {
-        $user = $request->user();
-        abort_unless($user->role === 'organization' && $user->organizationProfile, 403, 'هذه العملية متاحة للمؤسسة صاحبة المشروع فقط.');
-
-        return $user->organizationProfile;
     }
 
     private function failure(ProjectActionException $exception): JsonResponse

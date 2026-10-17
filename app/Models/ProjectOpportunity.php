@@ -6,6 +6,7 @@ use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\HasMany;
+use Illuminate\Database\Eloquent\Relations\HasOne;
 
 /** المشروع المنشور للطلاب. واحد لكل طلب مشروع؛ إعادة الاعتماد تحدّث النسخة النشطة فقط. */
 class ProjectOpportunity extends Model
@@ -16,7 +17,26 @@ class ProjectOpportunity extends Model
 
     public const STATUS_WITHDRAWN = 'withdrawn';
 
-    public const STATUSES = [self::STATUS_PUBLISHED, self::STATUS_SUSPENDED, self::STATUS_WITHDRAWN];
+    /** بانتظار مراجعة مدير المنصة؛ لا يراه الطلاب */
+    public const STATUS_PENDING_REVIEW = 'pending_review';
+
+    /** طلب مدير المنصة تعديلات من المؤسسة قبل النشر */
+    public const STATUS_CHANGES_REQUESTED = 'changes_requested';
+
+    /** رفضه مدير المنصة */
+    public const STATUS_REJECTED = 'rejected';
+
+    public const STATUSES = [
+        self::STATUS_PENDING_REVIEW,
+        self::STATUS_CHANGES_REQUESTED,
+        self::STATUS_REJECTED,
+        self::STATUS_PUBLISHED,
+        self::STATUS_SUSPENDED,
+        self::STATUS_WITHDRAWN,
+    ];
+
+    /** حالات المراجعة قبل النشر الأول أو بعد تعديل المقترح */
+    public const REVIEW_STATUSES = [self::STATUS_PENDING_REVIEW, self::STATUS_CHANGES_REQUESTED, self::STATUS_REJECTED];
 
     /*
      * مرحلة المشروع (project_status) منفصلة عن حالة النشر أعلاه: النشر = هل يراه الطلاب،
@@ -59,6 +79,13 @@ class ProjectOpportunity extends Model
         'project_request_id',
         'organization_id',
         'active_version_id',
+        'agreed_plan_version_id',
+        'agreed_at',
+        'reviewed_by_user_id',
+        'reviewed_at',
+        'submitted_for_review_at',
+        'execution_started_at',
+        'completed_at',
         'status',
         'project_status',
         'title',
@@ -79,6 +106,13 @@ class ProjectOpportunity extends Model
             'published_at' => 'datetime',
             'status_changed_at' => 'datetime',
             'min_weekly_hours' => 'integer',
+            'organization_id' => 'integer',
+            'agreed_plan_version_id' => 'integer',
+            'agreed_at' => 'datetime',
+            'reviewed_at' => 'datetime',
+            'submitted_for_review_at' => 'datetime',
+            'execution_started_at' => 'datetime',
+            'completed_at' => 'datetime',
         ];
     }
 
@@ -121,5 +155,46 @@ class ProjectOpportunity extends Model
     public function activeVersion(): BelongsTo
     {
         return $this->belongsTo(ProjectProposalVersion::class, 'active_version_id');
+    }
+
+    public function leaderAssignments(): HasMany
+    {
+        return $this->hasMany(ProjectLeaderAssignment::class);
+    }
+
+    /** قائد الفريق الساري لهذا المشروع (تعيين من مدير المنصة) */
+    public function activeLeaderAssignment(): HasOne
+    {
+        return $this->hasOne(ProjectLeaderAssignment::class)->whereNotNull('active_project_opportunity_id');
+    }
+
+    public function isLedBy(User $user): bool
+    {
+        return $this->leaderAssignments()->active()->where('leader_user_id', $user->id)->exists();
+    }
+
+    public function planVersions(): HasMany
+    {
+        return $this->hasMany(ProjectPlanVersion::class);
+    }
+
+    public function agreedPlan(): BelongsTo
+    {
+        return $this->belongsTo(ProjectPlanVersion::class, 'agreed_plan_version_id');
+    }
+
+    public function milestones(): HasMany
+    {
+        return $this->hasMany(ProjectMilestone::class)->orderBy('position');
+    }
+
+    public function tasks(): HasMany
+    {
+        return $this->hasMany(ProjectTask::class);
+    }
+
+    public function clientFeedback(): HasOne
+    {
+        return $this->hasOne(ProjectClientFeedback::class);
     }
 }

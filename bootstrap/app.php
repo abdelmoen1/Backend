@@ -1,5 +1,7 @@
 <?php
 
+use App\Http\Middleware\EnsureUserIsActive;
+use App\Http\Middleware\EnsureUserIsAdmin;
 use App\Support\QueryFailure;
 use Illuminate\Database\QueryException;
 use Illuminate\Foundation\Application;
@@ -20,6 +22,11 @@ return Application::configure(basePath: dirname(__DIR__))
 
         // إجابات التقييم تُحفظ حرفيًا: قص المسافات يغيّر إزاحة الكود
         $middleware->trimStrings(except: ['answer']);
+
+        $middleware->alias([
+            'active' => EnsureUserIsActive::class,
+            'admin' => EnsureUserIsAdmin::class,
+        ]);
     })
     ->withExceptions(function (Exceptions $exceptions) {
         // لا يُكتب الاستعلام بقيمه في السجل (أسئلة التقييم ومعاييره وإجابات الطلاب)؛ false يمنع السجل الافتراضي

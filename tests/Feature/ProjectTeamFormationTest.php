@@ -13,16 +13,18 @@ use App\Models\User;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Log;
 use Tests\Support\ProjectProposalFixture;
+use Tests\Support\ReviewsProjects;
 use Tests\TestCase;
 
 /**
- * Sprint 4: التقديم على الفرص، ترتيب المرشحين، تكوين الفريق وتعيين القائد.
+ * Sprint 4: التقديم على الفرص، ترتيب المرشحين، وتكوين الفريق بيد قائد الفريق الذي يعيّنه مدير المنصة.
  * المشروع من ProjectProposalFixture: دور جوال (Flutter + Dart، مرغوب Git) ودور خلفية (Laravel + REST API، مرغوب MySQL)،
  * كل دور لشخص واحد، والمستوى الأدنى مبتدئ ما لم يُذكر غيره.
  */
 class ProjectTeamFormationTest extends TestCase
 {
     use RefreshDatabase;
+    use ReviewsProjects;
 
     protected function setUp(): void
     {
@@ -75,6 +77,7 @@ class ProjectTeamFormationTest extends TestCase
     {
         $project = $this->project();
         $owner = $this->owner($project);
+        $leader = $this->assignedLeader($project);
         $ineligible = $this->student('ineligible@example.test', ['Flutter' => 'failed', 'Dart' => null]);
         $eligible = $this->student('eligible@example.test', ['Flutter' => 'passed', 'Dart' => 'passed']);
 
@@ -93,8 +96,11 @@ class ProjectTeamFormationTest extends TestCase
         $this->app['auth']->forgetGuards();
         $this->postJson($this->applyUrl($project))->assertUnauthorized();
 
-        // إغلاق التقديم: الفرصة تختفي من القائمة ويُرفض التقديم الجديد
-        $this->actingAs($owner, 'sanctum')->patchJson("/api/projects/{$project->id}", ['project_status' => 'matching'])
+        // قائد الفريق لا يتقدم إلى المشروع الذي يقوده
+        $this->actingAs($leader, 'sanctum')->postJson($this->applyUrl($project))->assertStatus(409)->assertJsonPath('reason', 'leader_of_project');
+
+        // إغلاق التقديم بيد القائد: الفرصة تختفي من القائمة ويُرفض التقديم الجديد
+        $this->actingAs($leader, 'sanctum')->patchJson("/api/projects/{$project->id}", ['project_status' => 'matching'])
             ->assertOk()
             ->assertJsonPath('data.project_status', 'matching')
             ->assertJsonPath('data.accepting_applications', false);
@@ -105,7 +111,7 @@ class ProjectTeamFormationTest extends TestCase
         $this->getJson("/api/opportunities/{$project->id}")->assertNotFound();
 
         // انتقال غير مسموح يدويًا
-        $this->actingAs($owner, 'sanctum')->patchJson("/api/projects/{$project->id}", ['project_status' => 'completed'])
+        $this->actingAs($leader, 'sanctum')->patchJson("/api/projects/{$project->id}", ['project_status' => 'completed'])
             ->assertStatus(409);
 
         // فرصة معلقة = غير موجودة للطالب
@@ -156,7 +162,7 @@ class ProjectTeamFormationTest extends TestCase
     public function test_matching_ranks_applicants_with_explainable_factors_and_handles_missing_data(): void
     {
         $project = $this->project();
-        $owner = $this->owner($project);
+        $leader = $this->assignedLeader($project);
         $project->update(['min_weekly_hours' => 10]);
         $mobileRole = $this->roleId($project, 'mobile_developer');
         $backendRole = $this->roleId($project, 'backend_developer');
@@ -177,7 +183,7 @@ class ProjectTeamFormationTest extends TestCase
         $lapsed = $this->student('lapsed@example.test', ['Flutter' => 'failed', 'Dart' => 'passed']);
         ProjectApplication::create(['project_opportunity_id' => $project->id, 'student_profile_id' => $lapsed->studentProfile->id, 'status' => 'pending']);
 
-        $response = $this->actingAs($owner, 'sanctum')->getJson("/api/projects/{$project->id}/matches")->assertOk();
+        $response = $this->actingAs($leader, 'sanctum')->getJson("/api/projects/{$project->id}/matches")->assertOk();
 
         $response->assertJsonCount(2, 'data.candidates')
             ->assertJsonPath('data.candidates.0.student.name', 'strong@example.test')
@@ -220,17 +226,20 @@ class ProjectTeamFormationTest extends TestCase
         $this->assertSame('desirable', $skills['Git']['importance']);
         $this->assertTrue($skills['Git']['met']);
 
-        // من لم يقدّم لا تظهر هويته للمؤسسة
+        // من لم يقدّم لا تظهر هويته حتى للقائد
         $this->assertStringNotContainsString('silent@example.test', $response->getContent());
     }
 
-    public function test_matching_and_team_management_are_restricted_to_the_owning_organization(): void
+    public function test_matching_and_team_management_are_restricted_to_the_assigned_leader(): void
     {
         $project = $this->project();
         $owner = $this->owner($project);
+        $leader = $this->assignedLeader($project);
+        $otherProject = $this->project();
+        $otherLeader = $this->assignedLeader($otherProject);
         $student = $this->student('member@example.test', ['Flutter' => 'passed', 'Dart' => 'passed']);
         $applicationId = $this->actingAs($student, 'sanctum')->postJson($this->applyUrl($project))->json('data.id');
-        $teamId = $this->actingAs($owner, 'sanctum')->postJson("/api/projects/{$project->id}/team", ['members' => [
+        $teamId = $this->actingAs($leader, 'sanctum')->postJson("/api/projects/{$project->id}/team", ['members' => [
             ['application_id' => $applicationId, 'role_id' => $this->roleId($project, 'mobile_developer')],
         ]])->assertOk()->json('data.id');
 
@@ -241,21 +250,23 @@ class ProjectTeamFormationTest extends TestCase
             ['patch', "/api/projects/{$project->id}/applications/{$applicationId}", ['status' => 'rejected']],
             ['get', "/api/projects/{$project->id}/team", []],
             ['post', "/api/projects/{$project->id}/team", ['members' => []]],
-            ['post', "/api/teams/{$teamId}/leader", ['student_profile_id' => $student->studentProfile->id]],
             ['post', "/api/teams/{$teamId}/confirm", []],
         ];
 
         foreach ($calls as [$method, $url, $body]) {
-            // مؤسسة أخرى: 404 دون كشف وجود المورد (IDOR)
-            $this->actingAs($otherOrganization, 'sanctum')->json($method, $url, $body)->assertNotFound();
-            // الطالب، حتى عضو الفريق نفسه، لا يدير الفريق
-            $this->actingAs($student, 'sanctum')->json($method, $url, $body)->assertForbidden();
+            // لا أحد غير القائد المعيّن: المؤسسة المالكة نفسها، مؤسسة أخرى، قائد مشروع آخر، وعضو الفريق — كلها 404
+            // دون كشف وجود المورد (IDOR). المؤسسة لا ترى ترتيب المرشحين ولا تختار الفريق.
+            foreach ([$owner, $otherOrganization, $otherLeader, $student] as $intruder) {
+                $this->actingAs($intruder, 'sanctum')->json($method, $url, $body)->assertNotFound();
+            }
         }
+        // مسار تعيين القائد من الفريق أزيل: القائد يعيّنه مدير المنصة فقط
+        $this->actingAs($owner, 'sanctum')->postJson("/api/teams/{$teamId}/leader", ['student_profile_id' => $student->studentProfile->id])->assertNotFound();
         $this->app['auth']->forgetGuards();
         $this->getJson("/api/projects/{$project->id}/matches")->assertUnauthorized();
 
-        $team = ProjectTeam::sole();
-        $this->assertNull($team->leader_student_profile_id);
+        $team = ProjectTeam::query()->where('project_opportunity_id', $project->id)->sole();
+        $this->assertSame($leader->studentProfile->id, $team->leader_student_profile_id);
         $this->assertSame(ProjectTeam::STATUS_FORMING, $team->status);
         $this->assertSame('team_formation', $project->fresh()->project_status);
     }
@@ -263,14 +274,14 @@ class ProjectTeamFormationTest extends TestCase
     public function test_team_members_must_come_from_the_eligible_applicant_pool_without_duplicates(): void
     {
         $project = $this->project();
-        $owner = $this->owner($project);
+        $leader = $this->assignedLeader($project);
         $mobileRole = $this->roleId($project, 'mobile_developer');
         $backendRole = $this->roleId($project, 'backend_developer');
 
         $mobile = $this->applicant($project, 'mobile@example.test', ['Flutter' => 'passed', 'Dart' => 'passed']);
         $mobile2 = $this->applicant($project, 'mobile2@example.test', ['Flutter' => 'passed', 'Dart' => 'passed']);
         $rejected = $this->applicant($project, 'rejected@example.test', ['Flutter' => 'passed', 'Dart' => 'passed']);
-        $this->actingAs($owner, 'sanctum')->patchJson("/api/projects/{$project->id}/applications/{$rejected}", ['status' => 'rejected'])
+        $this->actingAs($leader, 'sanctum')->patchJson("/api/projects/{$project->id}/applications/{$rejected}", ['status' => 'rejected'])
             ->assertOk()
             ->assertJsonPath('data.status', 'rejected');
 
@@ -279,7 +290,7 @@ class ProjectTeamFormationTest extends TestCase
         $outsider = $this->applicant($otherProject, 'outsider@example.test', ['Flutter' => 'passed', 'Dart' => 'passed']);
 
         $url = "/api/projects/{$project->id}/team";
-        $this->actingAs($owner, 'sanctum');
+        $this->actingAs($leader, 'sanctum');
         $cases = [
             'duplicate_member' => [['application_id' => $mobile, 'role_id' => $mobileRole], ['application_id' => $mobile, 'role_id' => $mobileRole]],
             'not_in_pool' => [['application_id' => $outsider, 'role_id' => $mobileRole]],
@@ -292,7 +303,7 @@ class ProjectTeamFormationTest extends TestCase
         foreach ($cases as $reason => $members) {
             $this->postJson($url, ['members' => $members])->assertStatus(422)->assertJsonPath('reason', $reason);
         }
-        $this->assertSame(0, ProjectTeam::count());
+        $this->assertSame(0, ProjectTeam::query()->where('project_opportunity_id', $project->id)->count());
 
         Log::spy();
         $this->postJson($url, ['members' => [['application_id' => $mobile, 'role_id' => $mobileRole]]])
@@ -306,76 +317,67 @@ class ProjectTeamFormationTest extends TestCase
 
         // استبدال العضو: المُزال يعود طلبه إلى "تمت المراجعة"، ولا ينشأ فريق ثانٍ
         $this->postJson($url, ['members' => [['application_id' => $mobile2, 'role_id' => $mobileRole]]])->assertOk();
-        $this->assertSame(1, ProjectTeam::count());
+        $this->assertSame(1, ProjectTeam::query()->where('project_opportunity_id', $project->id)->count());
         $this->assertSame('reviewed', ProjectApplication::find($mobile)->status);
         $this->assertSame('accepted', ProjectApplication::find($mobile2)->status);
         // لا يُرفض طالب ضمن الفريق قبل إزالته
         $this->patchJson("/api/projects/{$project->id}/applications/{$mobile2}", ['status' => 'rejected'])->assertStatus(409);
     }
 
-    public function test_a_single_leader_from_the_team_is_assigned_changed_and_logged(): void
+    public function test_confirmation_requires_the_admin_assigned_leader_who_is_never_a_team_member(): void
     {
         $project = $this->project();
-        $owner = $this->owner($project);
+        $leader = $this->assignedLeader($project);
         $mobile = $this->applicant($project, 'lead-mobile@example.test', ['Flutter' => 'passed', 'Dart' => 'passed']);
         $backend = $this->applicant($project, 'lead-backend@example.test', ['Laravel' => 'passed', 'REST API' => 'passed']);
-        $bystander = $this->applicant($project, 'bystander@example.test', ['Flutter' => 'passed', 'Dart' => 'passed']);
-        $profile = fn (int $applicationId): int => ProjectApplication::find($applicationId)->student_profile_id;
 
-        $this->actingAs($owner, 'sanctum');
-        $teamId = $this->postJson("/api/projects/{$project->id}/team", ['members' => [
+        $this->actingAs($leader, 'sanctum');
+        Log::spy();
+        $response = $this->postJson("/api/projects/{$project->id}/team", ['members' => [
             ['application_id' => $mobile, 'role_id' => $this->roleId($project, 'mobile_developer')],
             ['application_id' => $backend, 'role_id' => $this->roleId($project, 'backend_developer')],
-        ]])->assertOk()->json('data.id');
+        ]])->assertOk();
+        $teamId = $response->json('data.id');
+        // الفريق يعرض القائد المعيّن، والقائد ليس من الأعضاء
+        $response->assertJsonPath('data.leader.student_profile_id', $leader->studentProfile->id);
+        $this->assertSame(0, collect($response->json('data.members'))->where('is_leader', true)->count());
 
-        // تأكيد دون قائد مرفوض
-        $this->postJson("/api/teams/{$teamId}/confirm")->assertStatus(422)->assertJsonPath('reason', 'leader_required');
-        // القائد يجب أن يكون عضوًا في هذا الفريق
-        $this->postJson("/api/teams/{$teamId}/leader", ['student_profile_id' => $profile($bystander)])
-            ->assertStatus(422)
-            ->assertJsonPath('reason', 'leader_not_member');
+        // إلغاء التعيين يسحب الصلاحية فورًا ويمنع التأكيد
+        $this->actingAs($this->platformAdmin(), 'sanctum')
+            ->deleteJson("/api/admin/projects/{$project->id}/leader", ['reason' => 'إعادة توزيع القادة'])
+            ->assertOk();
+        $this->actingAs($leader, 'sanctum')->postJson("/api/teams/{$teamId}/confirm")->assertNotFound();
 
-        Log::spy();
-        $this->postJson("/api/teams/{$teamId}/leader", ['student_profile_id' => $profile($mobile)])
+        $newLeader = $this->assignedLeader($project);
+        $this->actingAs($newLeader, 'sanctum')->postJson("/api/teams/{$teamId}/confirm")
             ->assertOk()
-            ->assertJsonPath('data.leader.student_profile_id', $profile($mobile));
-        $this->assertNotNull(ProjectTeam::find($teamId)->leader_assigned_at);
-        Log::shouldHaveReceived('info')->withArgs(fn (string $message): bool => $message === 'Project team leader assigned.')->once();
-
-        $this->postJson("/api/teams/{$teamId}/confirm")->assertOk()->assertJsonPath('data.status', ProjectTeam::STATUS_READY);
-        // بعد التأكيد: التشكيلة مقفلة، وتغيير القائد ممكن
+            ->assertJsonPath('data.status', ProjectTeam::STATUS_READY);
+        // بعد التأكيد: التشكيلة مقفلة
         $this->postJson("/api/projects/{$project->id}/team", ['members' => []])->assertStatus(409)->assertJsonPath('reason', 'team_locked');
-        $response = $this->postJson("/api/teams/{$teamId}/leader", ['student_profile_id' => $profile($backend)])
-            ->assertOk()
-            ->assertJsonPath('data.leader.student_profile_id', $profile($backend));
-        $this->assertSame(1, collect($response->json('data.members'))->where('is_leader', true)->count());
-        Log::shouldHaveReceived('info')->withArgs(fn (string $message, array $context = []): bool => $message === 'Project team leader changed.'
-            && $context['previous_leader_student_profile_id'] === $profile($mobile))->once();
+        $this->assertSame($newLeader->studentProfile->id, ProjectTeam::find($teamId)->leader_student_profile_id);
 
         // عضو في فريق مؤكد لا يسحب طلبه بنفسه
         $member = User::where('email', 'lead-backend@example.test')->first();
         $this->actingAs($member, 'sanctum')->postJson("/api/student/applications/{$backend}/withdraw")->assertStatus(409);
     }
 
-    public function test_withdrawing_from_a_forming_team_removes_the_member_and_clears_the_leader(): void
+    public function test_withdrawing_from_a_forming_team_removes_the_member_and_keeps_the_assigned_leader(): void
     {
         $project = $this->project();
-        $owner = $this->owner($project);
+        $leader = $this->assignedLeader($project);
         $application = $this->applicant($project, 'leaving@example.test', ['Flutter' => 'passed', 'Dart' => 'passed']);
-        $profileId = ProjectApplication::find($application)->student_profile_id;
 
-        $this->actingAs($owner, 'sanctum');
+        $this->actingAs($leader, 'sanctum');
         $teamId = $this->postJson("/api/projects/{$project->id}/team", ['members' => [
             ['application_id' => $application, 'role_id' => $this->roleId($project, 'mobile_developer')],
         ]])->json('data.id');
-        $this->postJson("/api/teams/{$teamId}/leader", ['student_profile_id' => $profileId])->assertOk();
 
         $this->actingAs(User::where('email', 'leaving@example.test')->first(), 'sanctum')
             ->postJson("/api/student/applications/{$application}/withdraw")
             ->assertOk();
 
         $team = ProjectTeam::find($teamId);
-        $this->assertNull($team->leader_student_profile_id);
+        $this->assertSame($leader->studentProfile->id, $team->leader_student_profile_id);
         $this->assertSame(0, $team->members()->count());
     }
 
@@ -400,10 +402,12 @@ class ProjectTeamFormationTest extends TestCase
         ]);
         $this->actingAs($organization, 'sanctum')
             ->postJson("/api/organization/project-requests/{$projectRequest->id}/approve", ProjectProposalFixture::approval())
-            ->assertOk();
+            ->assertOk()
+            ->assertJsonPath('data.publication.status', ProjectOpportunity::STATUS_PENDING_REVIEW);
         $this->app['auth']->forgetGuards();
 
-        return ProjectOpportunity::query()->where('project_request_id', $projectRequest->id)->sole();
+        // اعتماد المؤسسة يضع المشروع في قائمة مراجعة مدير المنصة؛ النشر للطلاب بقراره فقط
+        return $this->adminApprove(ProjectOpportunity::query()->where('project_request_id', $projectRequest->id)->sole());
     }
 
     private function owner(ProjectOpportunity $project): User

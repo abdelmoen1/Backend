@@ -2,6 +2,7 @@
 
 namespace App\Services\Projects;
 
+use App\Models\PlatformNotification;
 use App\Models\ProjectApplication;
 use App\Models\ProjectOpportunity;
 use App\Models\ProjectTeam;
@@ -37,6 +38,11 @@ class ProjectApplications
                     ->first();
                 if (! $opportunity) {
                     throw new ProjectActionException('هذه الفرصة غير متاحة حاليًا.', 'not_found', 404);
+                }
+
+                // القيادة مرتبطة بالمشروع: من يقود هذا المشروع لا يتقدم إليه (ويمكنه التقديم على مشاريع أخرى)
+                if ($opportunity->leaderAssignments()->active()->where('leader_user_id', $student->user_id)->exists()) {
+                    throw new ProjectActionException('أنت قائد فريق هذا المشروع، فلا يمكنك التقديم عليه كعضو.', 'leader_of_project', 409);
                 }
 
                 $existing = $opportunity->applications()->where('student_profile_id', $student->id)->first();
@@ -126,10 +132,10 @@ class ProjectApplications
         });
     }
 
-    /** مراجعة المؤسسة: reviewed أو rejected (أو التراجع عن الرفض). */
+    /** مراجعة قائد الفريق: reviewed أو rejected (أو التراجع عن الرفض)، ويُبلَّغ الطالب بالحالة الجديدة. */
     public function review(ProjectOpportunity $opportunity, int $applicationId, string $status, User $actor): ProjectApplication
     {
-        return DB::transaction(function () use ($opportunity, $applicationId, $status, $actor): ProjectApplication {
+        $application = DB::transaction(function () use ($opportunity, $applicationId, $status, $actor): ProjectApplication {
             $application = $opportunity->applications()->whereKey($applicationId)->lockForUpdate()->first();
             if (! $application) {
                 throw new ProjectActionException('الطلب غير موجود في هذا المشروع.', 'not_found', 404);
@@ -154,5 +160,22 @@ class ProjectApplications
 
             return $application;
         });
+
+        $messages = [
+            ProjectApplication::STATUS_REVIEWED => ['تمت مراجعة طلبك', "راجع قائد الفريق طلبك للانضمام إلى «{$opportunity->title}» وهو قيد الدراسة لتكوين الفريق."],
+            ProjectApplication::STATUS_REJECTED => ['لم يُقبل طلبك', "لم يتم اختيار طلبك للانضمام إلى «{$opportunity->title}». يمكنك التقديم على فرص أخرى مناسبة لمهاراتك."],
+            ProjectApplication::STATUS_PENDING => ['أُعيد طلبك إلى الانتظار', "أعاد قائد الفريق طلبك للانضمام إلى «{$opportunity->title}» إلى قائمة الانتظار."],
+        ];
+        if (isset($messages[$status])) {
+            PlatformNotification::send($application->studentProfile?->user,
+                'application.'.$status,
+                $messages[$status][0],
+                $messages[$status][1],
+                '/student/applications',
+                ['project_id' => $opportunity->id, 'application_id' => $application->id],
+            );
+        }
+
+        return $application;
     }
 }

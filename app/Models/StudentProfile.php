@@ -72,4 +72,9 @@ class StudentProfile extends Model
     {
         return $this->hasMany(ProjectTeamMember::class);
     }
+
+    public function evidence(): HasMany
+    {
+        return $this->hasMany(StudentEvidence::class);
+    }
 }

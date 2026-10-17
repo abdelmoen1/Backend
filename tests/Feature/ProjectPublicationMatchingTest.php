@@ -19,6 +19,7 @@ use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Testing\TestResponse;
 use Tests\Support\FakesAssessmentGemini;
 use Tests\Support\ProjectProposalFixture;
+use Tests\Support\ReviewsProjects;
 use Tests\TestCase;
 
 /**
@@ -30,6 +31,7 @@ class ProjectPublicationMatchingTest extends TestCase
 {
     use FakesAssessmentGemini;
     use RefreshDatabase;
+    use ReviewsProjects;
 
     protected function setUp(): void
     {
@@ -54,7 +56,8 @@ class ProjectPublicationMatchingTest extends TestCase
         $this->postJson($this->url($projectRequest, 'approve'), ProjectProposalFixture::approval(levels: ['Flutter' => 'advanced', 'Laravel' => 'intermediate']))
             ->assertOk()
             ->assertJsonPath('data.status', ProjectRequestStatus::CONVERTED_TO_OPPORTUNITY)
-            ->assertJsonPath('data.publication.status', ProjectOpportunity::STATUS_PUBLISHED)
+            // اعتماد المؤسسة لا ينشر للطلاب: ينتظر مراجعة مدير المنصة
+            ->assertJsonPath('data.publication.status', ProjectOpportunity::STATUS_PENDING_REVIEW)
             ->assertJsonPath('data.publication.version', 1)
             ->assertJsonPath('data.publication.has_pending_changes', false)
             ->assertJsonPath('data.publication.levels_confirmed', true)
@@ -74,6 +77,9 @@ class ProjectPublicationMatchingTest extends TestCase
         $this->assertSame('intermediate', $version->staffing['roles'][0]['mandatory_skills'][0]['recommended_level']);
         $this->assertNull(ProjectRoleSkill::query()->where('importance', ProjectRoleSkill::DESIRABLE)->value('min_level'));
 
+        $this->adminApprove(ProjectOpportunity::query()->sole());
+        $this->actingAs($organization, 'sanctum');
+
         // نقرات مكررة أو إعادة محاولة عبر الشبكة لا تنشئ نسخًا أو فرصًا جديدة
         foreach (range(1, 2) as $_) {
             $this->postJson($this->url($projectRequest, 'approve'), ProjectProposalFixture::approval(levels: ['Flutter' => 'advanced', 'Laravel' => 'intermediate']))->assertOk();
@@ -81,10 +87,12 @@ class ProjectPublicationMatchingTest extends TestCase
         $this->assertDatabaseCount('project_opportunities', 1);
         $this->assertDatabaseCount('project_proposal_versions', 1);
         $this->assertDatabaseCount('project_roles', 2);
+        $this->assertSame(ProjectOpportunity::STATUS_PUBLISHED, ProjectOpportunity::query()->sole()->status);
 
-        // تغيير المستويات وحدها ينشئ نسخة معتمدة جديدة ولا يعدّل النسخة السابقة
+        // تغيير المستويات وحدها ينشئ نسخة معتمدة جديدة ولا يعدّل النسخة السابقة، وتعود لمراجعة مدير المنصة
         $this->postJson($this->url($projectRequest, 'approve'), ProjectProposalFixture::approval(levels: ['Flutter' => 'intermediate', 'Laravel' => 'intermediate']))
             ->assertOk()
+            ->assertJsonPath('data.publication.status', ProjectOpportunity::STATUS_PENDING_REVIEW)
             ->assertJsonPath('data.publication.version', 2)
             ->assertJsonPath('data.publication.has_pending_changes', false)
             ->assertJsonPath('data.publication.roles.0.mandatory_requirements.0.min_level', 'intermediate');
@@ -359,7 +367,11 @@ class ProjectPublicationMatchingTest extends TestCase
             ->postJson($this->url($projectRequest, 'approve'), ProjectProposalFixture::approval($revised))
             ->assertOk()
             ->assertJsonPath('data.publication.version', 2)
+            ->assertJsonPath('data.publication.status', ProjectOpportunity::STATUS_PENDING_REVIEW)
             ->assertJsonPath('data.publication.has_pending_changes', false);
+        // النطاق المعدل لا يصل للطلاب قبل مراجعة مدير المنصة
+        $this->actingAs($backend, 'sanctum')->getJson('/api/student/opportunities')->assertJsonCount(0, 'data.opportunities');
+        $this->adminApprove($opportunity);
 
         $this->assertSame(2, $projectRequest->proposalVersions()->count());
         $this->assertSame('نظام المواصلات - الإصدار المعدل', $opportunity->fresh()->title);
@@ -403,6 +415,7 @@ class ProjectPublicationMatchingTest extends TestCase
             ->assertOk()
             ->assertJsonPath('data.publication.version', 2)
             ->assertJsonPath('data.publication.levels_confirmed', true);
+        $this->adminApprove($opportunity);
         $this->actingAs($student, 'sanctum')
             ->getJson('/api/student/opportunities')
             ->assertJsonPath('data.opportunities.0.eligibility.status', OpportunityMatcher::LEVEL_INSUFFICIENT);
@@ -601,9 +614,10 @@ class ProjectPublicationMatchingTest extends TestCase
         [$organization, $projectRequest] = $this->readyProject(null, 'publisher-'.uniqid().'@example.test');
         $this->actingAs($organization, 'sanctum')
             ->postJson($this->url($projectRequest, 'approve'), ProjectProposalFixture::approval(levels: $levels))
-            ->assertOk();
+            ->assertOk()
+            ->assertJsonPath('data.publication.status', ProjectOpportunity::STATUS_PENDING_REVIEW);
 
-        return ProjectOpportunity::query()->where('project_request_id', $projectRequest->id)->sole();
+        return $this->adminApprove(ProjectOpportunity::query()->where('project_request_id', $projectRequest->id)->sole());
     }
 
     /** @return array{0: User, 1: ProjectRequest} */

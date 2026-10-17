@@ -12,6 +12,10 @@ class StudentSkill extends Model
 
     public $timestamps = false;
 
+    // الجدول بلا عمود id (المفتاح فريد مركب student_profile_id + skill_id)؛ بدون هذا يطلب
+    // PostgreSQL قيمة "returning id" غير موجودة. التعديل والحذف يتمان باستعلامات where صريحة.
+    public $incrementing = false;
+
     protected $fillable = [
         'student_profile_id',
         'skill_id',

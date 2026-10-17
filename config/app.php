@@ -15,6 +15,9 @@ return [
 
     'name' => env('APP_NAME', 'Laravel'),
 
+    // الإيداع المنشور حاليًا (Render يضبط RENDER_GIT_COMMIT تلقائيًا)؛ يظهر في /api/health للتحقق من الإصدار
+    'release' => env('APP_RELEASE', env('RENDER_GIT_COMMIT')),
+
     /*
     |--------------------------------------------------------------------------
     | Application Environment
